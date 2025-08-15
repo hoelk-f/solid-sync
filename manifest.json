@@ -1,0 +1,8 @@
+{
+  "domain": "solid",
+  "name": "SOLID",
+  "config_flow": true,
+  "requirements": ["aiohttp"],
+  "iot_class": "cloud_polling",
+  "version": "0.0.1"
+}
