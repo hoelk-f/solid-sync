@@ -1,37 +1,59 @@
 # Solid Sync
 
-This add-on mirrors selected Home Assistant sensor states into a Solid pod.
+This add-on mirrors Home Assistant entity snapshots into a Solid pod.
 
 ## Features
 
 - Ingress web UI with a dedicated `Solid` sidebar entry
+- Global Solid connection settings stored once
 - Multiple sync profiles
+- Multiple measurements per profile
 - OIDC client-credentials authentication
 - Live subscription to Home Assistant `state_changed` events
 - Manual test trigger per profile
 
 ## Current payload model
 
-Each sync writes JSON to the configured Solid resource:
+Each sync writes one new timestamped JSON resource below the configured base path:
 
 ```json
 {
-  "state": "23.4",
-  "attributes": {
-    "unit_of_measurement": "degC"
+  "profile": "Garden weather station",
+  "captured_at": "2026-03-15T16:42:01.284991+00:00",
+  "measurements": {
+    "temperature": {
+      "entity_id": "sensor.garden_temperature",
+      "state": "23.4",
+      "attributes": {
+        "unit_of_measurement": "degC"
+      }
+    },
+    "humidity": {
+      "entity_id": "sensor.garden_humidity",
+      "state": "48",
+      "attributes": {
+        "unit_of_measurement": "%"
+      }
+    }
   }
 }
+```
+
+For a base path like `weather-stations/garden`, each sync writes a new file such as:
+
+```text
+weather-stations/garden/2026-03-15T16-42-01.284991Z.json
 ```
 
 ## First start
 
 1. Install and start the add-on.
 2. Open the web UI via the `Solid` sidebar entry or `Open Web UI`.
-3. Create one or more sync profiles.
-4. Choose a Home Assistant sensor, Solid pod URL, OIDC issuer URL, client token and client secret.
+3. Save your Solid connection settings once at the top of the page.
+4. Create one or more profiles with a resource base path and multiple measurement mappings.
 
 ## Notes
 
-- The add-on stores its profiles in `/data/solid-sync.json`.
+- The add-on stores both settings and profiles in `/data/solid-sync.json`.
 - Secrets are stored there in plain text because the add-on needs them to authenticate against the Solid issuer.
-- This first add-on version keeps the current fixed payload structure. Flexible data modeling can be added next.
+- Each `state_changed` event from a mapped entity creates a new snapshot resource.

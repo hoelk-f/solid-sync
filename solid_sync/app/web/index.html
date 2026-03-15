@@ -11,10 +11,10 @@
       <section class="hero">
         <div>
           <p class="eyebrow">Solid Sync</p>
-          <h1>Mirror Home Assistant sensors into your Solid pod.</h1>
+          <h1>Sync station snapshots to your Solid pod.</h1>
           <p class="lede">
-            Create sync profiles, test them directly, and monitor the live
-            connection to Home Assistant from one place.
+            Save your Solid connection once, then build station-style profiles
+            with multiple measurements per resource.
           </p>
         </div>
         <div class="hero-status" id="service-status">
@@ -23,70 +23,92 @@
       </section>
 
       <section class="grid">
-        <article class="card form-card">
-          <div class="card-head">
-            <div>
-              <p class="card-kicker">Configuration</p>
-              <h2 id="form-title">New profile</h2>
+        <div class="editor-stack">
+          <article class="card">
+            <div class="card-head">
+              <div>
+                <p class="card-kicker">Solid Connection</p>
+                <h2>Stored once for all profiles</h2>
+              </div>
             </div>
-            <button class="ghost" id="cancel-edit" type="button" hidden>
-              Cancel edit
-            </button>
-          </div>
 
-          <form id="profile-form">
-            <label>
-              <span>Name</span>
-              <input id="name" name="name" type="text" placeholder="Living room temperature" required />
-            </label>
+            <form id="settings-form">
+              <label>
+                <span>OIDC issuer URL</span>
+                <input id="settings_oidc_url" name="oidc_url" type="url" placeholder="https://issuer.example" required />
+              </label>
 
-            <label>
-              <span>Sensor</span>
-              <select id="sensor_entity_id" name="sensor_entity_id" required></select>
-            </label>
+              <label>
+                <span>POD URL</span>
+                <input id="settings_pod_url" name="pod_url" type="url" placeholder="https://pod.example/user" required />
+              </label>
 
-            <label>
-              <span>OIDC issuer URL</span>
-              <input id="oidc_url" name="oidc_url" type="url" placeholder="https://issuer.example" required />
-            </label>
+              <label>
+                <span>Client token</span>
+                <input id="settings_client_token" name="client_token" type="text" required />
+              </label>
 
-            <label>
-              <span>POD URL</span>
-              <input id="pod_url" name="pod_url" type="url" placeholder="https://pod.example/user" required />
-            </label>
+              <label>
+                <span>Client secret</span>
+                <input id="settings_client_secret" name="client_secret" type="password" required />
+              </label>
 
-            <label>
-              <span>Client token</span>
-              <input id="client_token" name="client_token" type="text" required />
-            </label>
+              <div class="actions">
+                <button class="primary" type="submit">Save Solid settings</button>
+              </div>
+            </form>
+          </article>
 
-            <label>
-              <span>Client secret</span>
-              <input id="client_secret" name="client_secret" type="password" required />
-            </label>
-
-            <label>
-              <span>Resource path in the pod</span>
-              <input id="resource_path" name="resource_path" type="text" placeholder="sensor.living_room_temperature" />
-            </label>
-
-            <label class="switch-row">
-              <input id="enabled" name="enabled" type="checkbox" checked />
-              <span>Profile enabled</span>
-            </label>
-
-            <div class="actions">
-              <button class="primary" type="submit" id="submit-button">Save profile</button>
-              <button class="ghost" type="button" id="refresh-sensors">Refresh sensors</button>
+          <article class="card form-card">
+            <div class="card-head">
+              <div>
+                <p class="card-kicker">Station Profile</p>
+                <h2 id="form-title">New profile</h2>
+              </div>
+              <button class="ghost" id="cancel-edit" type="button" hidden>
+                Cancel edit
+              </button>
             </div>
-          </form>
-        </article>
 
-        <article class="card">
+            <form id="profile-form">
+              <label>
+                <span>Name</span>
+                <input id="name" name="name" type="text" placeholder="Garden weather station" required />
+              </label>
+
+              <label>
+                <span>Resource base path</span>
+                <input id="resource_path" name="resource_path" type="text" placeholder="weather-stations/garden" required />
+                <small class="helper">Each sync creates a new file below this path using a timestamp.</small>
+              </label>
+
+              <div class="measurements-block">
+                <div class="section-head">
+                  <div>
+                    <p class="card-kicker">Measurements</p>
+                    <h3>Map multiple entities into one resource</h3>
+                  </div>
+                  <div class="actions">
+                    <button class="ghost" type="button" id="add-measurement">Add measurement</button>
+                    <button class="ghost" type="button" id="refresh-entities">Refresh entities</button>
+                  </div>
+                </div>
+
+                <div id="measurement-list" class="measurement-list"></div>
+              </div>
+
+              <div class="actions">
+                <button class="primary" type="submit" id="submit-button">Save profile</button>
+              </div>
+            </form>
+          </article>
+        </div>
+
+        <article class="card profiles-card">
           <div class="card-head">
             <div>
               <p class="card-kicker">Profiles</p>
-              <h2>Active sync definitions</h2>
+              <h2>Station snapshots</h2>
             </div>
             <span class="count" id="profile-count">0</span>
           </div>
@@ -98,19 +120,35 @@
       </section>
     </main>
 
+    <template id="measurement-template">
+      <div class="measurement-row">
+        <label>
+          <span>Field key</span>
+          <input class="measurement-key" type="text" placeholder="temperature" required />
+        </label>
+        <label class="measurement-entity-wrap">
+          <span>Entity</span>
+          <select class="measurement-entity" required></select>
+        </label>
+        <button class="danger measurement-remove" type="button">Remove</button>
+      </div>
+    </template>
+
     <template id="profile-template">
       <article class="profile-card">
         <div class="profile-top">
           <div>
             <h3 class="profile-name"></h3>
-            <p class="profile-sensor"></p>
+            <p class="profile-resource"></p>
           </div>
-          <span class="pill profile-enabled"></span>
         </div>
+
+        <div class="chip-list profile-measurements"></div>
+
         <dl class="profile-meta">
           <div>
-            <dt>Resource</dt>
-            <dd class="profile-resource"></dd>
+            <dt>Last file</dt>
+            <dd class="profile-last-resource"></dd>
           </div>
           <div>
             <dt>Last sync</dt>
@@ -121,6 +159,7 @@
             <dd class="profile-last-error"></dd>
           </div>
         </dl>
+
         <div class="profile-actions">
           <button class="ghost action-edit" type="button">Edit</button>
           <button class="ghost action-test" type="button">Test now</button>

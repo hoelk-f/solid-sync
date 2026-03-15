@@ -1,6 +1,6 @@
 # Solid Sync
 
-Standalone Home Assistant add-on for mirroring sensor states into a Solid pod.
+Standalone Home Assistant add-on for mirroring Home Assistant snapshots into a Solid pod.
 
 ## Repository layout
 
@@ -13,17 +13,27 @@ archive/                 Archived custom-integration prototype
 ## What the add-on does
 
 - adds a `Solid` sidebar entry via ingress
+- stores Solid connection settings once for all profiles
 - lets you create multiple sync profiles in the web UI
+- lets each profile combine multiple entities into one snapshot
 - subscribes to Home Assistant `state_changed` events
-- writes the current fixed JSON payload to a Solid resource
+- writes each snapshot to a new timestamped Solid resource
 
 Current payload shape:
 
 ```json
 {
-  "state": "23.4",
-  "attributes": {
-    "unit_of_measurement": "degC"
+  "profile": "Garden weather station",
+  "captured_at": "2026-03-15T16:42:01.284991+00:00",
+  "measurements": {
+    "temperature": {
+      "entity_id": "sensor.garden_temperature",
+      "state": "23.4"
+    },
+    "humidity": {
+      "entity_id": "sensor.garden_humidity",
+      "state": "48"
+    }
   }
 }
 ```

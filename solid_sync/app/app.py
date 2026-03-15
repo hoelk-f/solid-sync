@@ -4,8 +4,9 @@ import asyncio
 import json
 import logging
 import os
+import re
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ import aiohttp
 from aiohttp import WSMsgType, web
 
 CONFIG_PATH = Path("/data/solid-sync.json")
+CONFIG_SCHEMA_VERSION = 2
 HA_API_BASE = "http://supervisor/core/api"
 HA_WS_URL = "ws://supervisor/core/websocket"
 INGRESS_PORT = 8099
@@ -27,19 +29,66 @@ def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def resource_timestamp() -> str:
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H-%M-%S") + f".{now.microsecond:06d}Z"
+
+
+def normalize_measurement_key(value: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9_]+", "_", value.strip().lower()).strip("_")
+    return normalized
+
+
+def default_measurement_key(entity_id: str) -> str:
+    object_id = entity_id.split(".", 1)[-1]
+    return normalize_measurement_key(object_id) or "value"
+
+
+def build_timestamped_resource_path(base_path: str) -> str:
+    normalized = base_path.strip().strip("/")
+    if not normalized:
+        raise RuntimeError("Resource path is empty")
+
+    timestamp = resource_timestamp()
+    if normalized.lower().endswith(".json"):
+        return f"{normalized[:-5]}--{timestamp}.json"
+
+    return f"{normalized}/{timestamp}.json"
+
+
+@dataclass
+class SolidSettings:
+    oidc_url: str = ""
+    pod_url: str = ""
+    client_token: str = ""
+    client_secret: str = ""
+
+    def is_complete(self) -> bool:
+        return all(
+            [
+                self.oidc_url.strip(),
+                self.pod_url.strip(),
+                self.client_token.strip(),
+                self.client_secret.strip(),
+            ]
+        )
+
+
+@dataclass
+class SyncMeasurement:
+    key: str
+    entity_id: str
+
+
 @dataclass
 class SyncProfile:
     id: str
     name: str
-    sensor_entity_id: str
-    oidc_url: str
-    pod_url: str
-    client_token: str
-    client_secret: str
     resource_path: str
-    enabled: bool = True
+    measurements: list[SyncMeasurement] = field(default_factory=list)
     last_sync_at: str | None = None
     last_error: str | None = None
+    last_resource_path: str | None = None
 
 
 class SolidOIDCClient:
@@ -122,8 +171,9 @@ class SolidOIDCClient:
 class SolidSyncService:
     def __init__(self) -> None:
         self._session: aiohttp.ClientSession | None = None
+        self._settings = SolidSettings()
         self._profiles: dict[str, SyncProfile] = {}
-        self._clients: dict[str, SolidOIDCClient] = {}
+        self._client: SolidOIDCClient | None = None
         self._config_lock = asyncio.Lock()
         self._shutdown_event = asyncio.Event()
         self._listener_task: asyncio.Task[None] | None = None
@@ -138,7 +188,7 @@ class SolidSyncService:
 
         timeout = aiohttp.ClientTimeout(total=60)
         self._session = aiohttp.ClientSession(timeout=timeout)
-        await self._load_profiles()
+        await self._load_config()
         self._listener_task = asyncio.create_task(self._run_listener(), name="ha-listener")
         LOGGER.info("Solid Sync service started with %s profile(s)", len(self._profiles))
 
@@ -183,39 +233,53 @@ class SolidSyncService:
         async with self._config_lock:
             return [asdict(profile) for profile in self._sorted_profiles()]
 
-    async def list_sensors(self) -> list[dict[str, Any]]:
+    async def list_entities(self) -> list[dict[str, Any]]:
         states = await self._fetch_states()
-        sensors = [
+        entities = [
             {
                 "entity_id": state["entity_id"],
                 "name": state.get("attributes", {}).get("friendly_name")
                 or state["entity_id"],
                 "state": state.get("state", ""),
+                "domain": state.get("entity_id", "").split(".", 1)[0],
             }
             for state in states
-            if state.get("entity_id", "").startswith("sensor.")
+            if state.get("entity_id")
         ]
-        sensors.sort(key=lambda item: item["name"].lower())
-        return sensors
+        entities.sort(key=lambda item: (item["name"].lower(), item["entity_id"].lower()))
+        return entities
 
     async def get_bootstrap(self) -> dict[str, Any]:
+        async with self._config_lock:
+            settings = asdict(self._settings)
+            profile_count = len(self._profiles)
+
         return {
+            "settings": settings,
             "profiles": await self.list_profiles(),
-            "sensors": await self.list_sensors(),
+            "entities": await self.list_entities(),
             "status": {
                 "listener_connected": self._listener_connected,
                 "listener_last_error": self._listener_last_error,
-                "profile_count": len(self._profiles),
+                "profile_count": profile_count,
+                "settings_complete": self._settings.is_complete(),
             },
         }
+
+    async def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        settings = self._build_settings(payload)
+        async with self._config_lock:
+            self._settings = settings
+            self._client = None
+            await self._save_config()
+            return asdict(self._settings)
 
     async def create_profile(self, payload: dict[str, Any]) -> dict[str, Any]:
         profile = self._build_profile(payload)
         async with self._config_lock:
             self._profiles[profile.id] = profile
-            self._clients[profile.id] = self._build_oidc_client(profile)
-            await self._save_profiles()
-        LOGGER.info("Created profile %s for %s", profile.name, profile.sensor_entity_id)
+            await self._save_config()
+        LOGGER.info("Created profile %s with %s measurements", profile.name, len(profile.measurements))
         return asdict(profile)
 
     async def update_profile(
@@ -229,8 +293,7 @@ class SolidSyncService:
         profile = self._build_profile(payload, profile_id=profile_id, existing=existing)
         async with self._config_lock:
             self._profiles[profile.id] = profile
-            self._clients[profile.id] = self._build_oidc_client(profile)
-            await self._save_profiles()
+            await self._save_config()
         LOGGER.info("Updated profile %s", profile.name)
         return asdict(profile)
 
@@ -239,45 +302,88 @@ class SolidSyncService:
             if profile_id not in self._profiles:
                 raise web.HTTPNotFound(text="Profile not found")
             removed = self._profiles.pop(profile_id)
-            self._clients.pop(profile_id, None)
-            await self._save_profiles()
+            await self._save_config()
         LOGGER.info("Deleted profile %s", removed.name)
 
     async def test_profile(self, profile_id: str) -> dict[str, Any]:
+        await self._sync_profile(profile_id, suppress_errors=False)
         async with self._config_lock:
             profile = self._profiles.get(profile_id)
             if not profile:
                 raise web.HTTPNotFound(text="Profile not found")
+            return asdict(profile)
 
-        state = await self._fetch_state(profile.sensor_entity_id)
-        if not state or state.get("state") in {"unknown", "unavailable"}:
-            raise web.HTTPBadRequest(text="Selected sensor has no usable current state")
-
-        await self._sync_profile(profile.id, state, suppress_errors=False)
-        async with self._config_lock:
-            updated = self._profiles[profile.id]
-            return asdict(updated)
-
-    async def _load_profiles(self) -> None:
+    async def _load_config(self) -> None:
         async with self._config_lock:
             if not CONFIG_PATH.exists():
+                self._settings = SolidSettings()
                 self._profiles = {}
-                self._clients = {}
+                self._client = None
                 return
 
             raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-            profiles = raw.get("profiles", [])
+            settings_data = raw.get("settings") or self._migrate_settings(raw)
+            self._settings = SolidSettings(
+                oidc_url=str(settings_data.get("oidc_url", "")).strip(),
+                pod_url=str(settings_data.get("pod_url", "")).strip(),
+                client_token=str(settings_data.get("client_token", "")).strip(),
+                client_secret=str(settings_data.get("client_secret", "")).strip(),
+            )
             self._profiles = {}
-            self._clients = {}
+            self._client = None
 
-            for item in profiles:
-                profile = SyncProfile(**item)
+            for item in raw.get("profiles", []):
+                profile = self._profile_from_dict(item)
                 self._profiles[profile.id] = profile
-                self._clients[profile.id] = self._build_oidc_client(profile)
 
-    async def _save_profiles(self) -> None:
+    def _migrate_settings(self, raw: dict[str, Any]) -> dict[str, str]:
+        profiles = raw.get("profiles", [])
+        if not profiles:
+            return {}
+
+        first = profiles[0]
+        return {
+            "oidc_url": first.get("oidc_url", ""),
+            "pod_url": first.get("pod_url", ""),
+            "client_token": first.get("client_token", ""),
+            "client_secret": first.get("client_secret", ""),
+        }
+
+    def _profile_from_dict(self, item: dict[str, Any]) -> SyncProfile:
+        measurements_raw = item.get("measurements")
+        if measurements_raw is None and item.get("sensor_entity_id"):
+            measurements_raw = [
+                {
+                    "key": default_measurement_key(str(item.get("sensor_entity_id", ""))),
+                    "entity_id": str(item.get("sensor_entity_id", "")),
+                }
+            ]
+
+        measurements = [
+            SyncMeasurement(
+                key=normalize_measurement_key(str(measurement.get("key", "")).strip())
+                or default_measurement_key(str(measurement.get("entity_id", ""))),
+                entity_id=str(measurement.get("entity_id", "")).strip(),
+            )
+            for measurement in (measurements_raw or [])
+            if str(measurement.get("entity_id", "")).strip()
+        ]
+
+        return SyncProfile(
+            id=str(item.get("id", uuid.uuid4())),
+            name=str(item.get("name", "")).strip(),
+            resource_path=str(item.get("resource_path", "")).strip(),
+            measurements=measurements,
+            last_sync_at=item.get("last_sync_at"),
+            last_error=item.get("last_error"),
+            last_resource_path=item.get("last_resource_path"),
+        )
+
+    async def _save_config(self) -> None:
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         payload = {
+            "schema_version": CONFIG_SCHEMA_VERSION,
+            "settings": asdict(self._settings),
             "profiles": [asdict(profile) for profile in self._sorted_profiles()],
             "saved_at": utcnow(),
         }
@@ -286,6 +392,31 @@ class SolidSyncService:
     def _sorted_profiles(self) -> list[SyncProfile]:
         return sorted(self._profiles.values(), key=lambda profile: profile.name.lower())
 
+    def _build_settings(self, payload: dict[str, Any]) -> SolidSettings:
+        settings = SolidSettings(
+            oidc_url=str(payload.get("oidc_url", "")).strip(),
+            pod_url=str(payload.get("pod_url", "")).strip(),
+            client_token=str(payload.get("client_token", "")).strip(),
+            client_secret=str(payload.get("client_secret", "")).strip(),
+        )
+
+        missing = [
+            field_name
+            for field_name, value in {
+                "oidc_url": settings.oidc_url,
+                "pod_url": settings.pod_url,
+                "client_token": settings.client_token,
+                "client_secret": settings.client_secret,
+            }.items()
+            if not value
+        ]
+        if missing:
+            raise web.HTTPBadRequest(
+                text=f"Missing required settings: {', '.join(sorted(missing))}"
+            )
+
+        return settings
+
     def _build_profile(
         self,
         payload: dict[str, Any],
@@ -293,23 +424,33 @@ class SolidSyncService:
         existing: SyncProfile | None = None,
     ) -> SyncProfile:
         name = str(payload.get("name", "")).strip()
-        sensor_entity_id = str(payload.get("sensor_entity_id", "")).strip()
-        oidc_url = str(payload.get("oidc_url", "")).strip()
-        pod_url = str(payload.get("pod_url", "")).strip()
-        client_token = str(payload.get("client_token", "")).strip()
-        client_secret = str(payload.get("client_secret", "")).strip()
-        resource_path = str(payload.get("resource_path", "")).strip() or sensor_entity_id
-        enabled = bool(payload.get("enabled", True))
+        resource_path = str(payload.get("resource_path", "")).strip()
+        measurements_payload = payload.get("measurements")
+
+        if not isinstance(measurements_payload, list):
+            raise web.HTTPBadRequest(text="measurements must be a list")
+
+        measurements: list[SyncMeasurement] = []
+        seen_keys: set[str] = set()
+        for item in measurements_payload:
+            key = normalize_measurement_key(str(item.get("key", "")).strip())
+            entity_id = str(item.get("entity_id", "")).strip()
+            if not key or not entity_id:
+                raise web.HTTPBadRequest(
+                    text="Each measurement requires a key and an entity_id"
+                )
+            if key in seen_keys:
+                raise web.HTTPBadRequest(
+                    text=f"Duplicate measurement key: {key}"
+                )
+            seen_keys.add(key)
+            measurements.append(SyncMeasurement(key=key, entity_id=entity_id))
 
         missing = [
             field_name
             for field_name, value in {
                 "name": name,
-                "sensor_entity_id": sensor_entity_id,
-                "oidc_url": oidc_url,
-                "pod_url": pod_url,
-                "client_token": client_token,
-                "client_secret": client_secret,
+                "resource_path": resource_path,
             }.items()
             if not value
         ]
@@ -317,32 +458,33 @@ class SolidSyncService:
             raise web.HTTPBadRequest(
                 text=f"Missing required fields: {', '.join(sorted(missing))}"
             )
-
-        if not sensor_entity_id.startswith("sensor."):
-            raise web.HTTPBadRequest(text="Only sensor entities are supported right now")
+        if not measurements:
+            raise web.HTTPBadRequest(text="At least one measurement is required")
 
         return SyncProfile(
             id=profile_id or str(uuid.uuid4()),
             name=name,
-            sensor_entity_id=sensor_entity_id,
-            oidc_url=oidc_url,
-            pod_url=pod_url,
-            client_token=client_token,
-            client_secret=client_secret,
             resource_path=resource_path,
-            enabled=enabled,
+            measurements=measurements,
             last_sync_at=existing.last_sync_at if existing else None,
             last_error=existing.last_error if existing else None,
+            last_resource_path=existing.last_resource_path if existing else None,
         )
 
-    def _build_oidc_client(self, profile: SyncProfile) -> SolidOIDCClient:
-        return SolidOIDCClient(
-            session=self.session,
-            oidc_url=profile.oidc_url,
-            pod_url=profile.pod_url,
-            client_token=profile.client_token,
-            client_secret=profile.client_secret,
-        )
+    def _get_client(self) -> SolidOIDCClient:
+        if not self._settings.is_complete():
+            raise RuntimeError("Solid settings are incomplete")
+
+        if self._client is None:
+            self._client = SolidOIDCClient(
+                session=self.session,
+                oidc_url=self._settings.oidc_url,
+                pod_url=self._settings.pod_url,
+                client_token=self._settings.client_token,
+                client_secret=self._settings.client_secret,
+            )
+
+        return self._client
 
     async def _fetch_states(self) -> list[dict[str, Any]]:
         async with self.session.get(
@@ -419,7 +561,9 @@ class SolidSyncService:
                 LOGGER.warning("Listener error: %s", err)
                 await asyncio.sleep(backoff_seconds)
 
-    async def _authenticate_websocket(self, websocket: aiohttp.ClientWebSocketResponse) -> None:
+    async def _authenticate_websocket(
+        self, websocket: aiohttp.ClientWebSocketResponse
+    ) -> None:
         auth_required = await websocket.receive_json()
         if auth_required.get("type") != "auth_required":
             raise RuntimeError(f"Unexpected websocket greeting: {auth_required}")
@@ -449,41 +593,33 @@ class SolidSyncService:
             matching_profile_ids = [
                 profile.id
                 for profile in self._profiles.values()
-                if profile.enabled and profile.sensor_entity_id == entity_id
+                if any(
+                    measurement.entity_id == entity_id
+                    for measurement in profile.measurements
+                )
             ]
 
-        if not matching_profile_ids:
-            return
-
         for profile_id in matching_profile_ids:
-            await self._sync_profile(profile_id, new_state, suppress_errors=True)
+            await self._sync_profile(profile_id, suppress_errors=True)
 
-    async def _sync_profile(
-        self,
-        profile_id: str,
-        state: dict[str, Any],
-        suppress_errors: bool,
-    ) -> None:
+    async def _sync_profile(self, profile_id: str, suppress_errors: bool) -> None:
         async with self._config_lock:
             profile = self._profiles.get(profile_id)
-            client = self._clients.get(profile_id)
 
-        if not profile or not client or not profile.enabled:
+        if not profile:
             return
 
-        payload = {
-            "state": state.get("state"),
-            "attributes": state.get("attributes", {}),
-        }
-
         try:
-            await client.put_json(profile.resource_path, payload)
+            snapshot = await self._build_snapshot(profile)
+            target_path = build_timestamped_resource_path(profile.resource_path)
+            client = self._get_client()
+            await client.put_json(target_path, snapshot)
         except Exception as err:
             async with self._config_lock:
                 current = self._profiles.get(profile_id)
                 if current:
                     current.last_error = str(err)
-                    await self._save_profiles()
+                    await self._save_config()
             LOGGER.error("Profile %s sync failed: %s", profile.name, err)
             if not suppress_errors:
                 raise
@@ -492,11 +628,44 @@ class SolidSyncService:
         async with self._config_lock:
             current = self._profiles.get(profile_id)
             if current:
-                current.last_sync_at = utcnow()
+                current.last_sync_at = snapshot["captured_at"]
                 current.last_error = None
-                await self._save_profiles()
+                current.last_resource_path = target_path
+                await self._save_config()
 
-        LOGGER.info("Synced %s to %s", profile.sensor_entity_id, profile.resource_path)
+        LOGGER.info("Synced profile %s to %s", profile.name, target_path)
+
+    async def _build_snapshot(self, profile: SyncProfile) -> dict[str, Any]:
+        states = await asyncio.gather(
+            *[self._fetch_state(measurement.entity_id) for measurement in profile.measurements]
+        )
+
+        measurements_payload: dict[str, Any] = {}
+        missing_entities: list[str] = []
+
+        for measurement, state in zip(profile.measurements, states):
+            if state is None:
+                missing_entities.append(measurement.entity_id)
+                continue
+
+            measurements_payload[measurement.key] = {
+                "entity_id": measurement.entity_id,
+                "state": state.get("state"),
+                "attributes": state.get("attributes", {}),
+                "last_changed": state.get("last_changed"),
+                "last_updated": state.get("last_updated"),
+            }
+
+        if missing_entities:
+            raise RuntimeError(
+                "Missing current states for: " + ", ".join(sorted(missing_entities))
+            )
+
+        return {
+            "profile": profile.name,
+            "captured_at": utcnow(),
+            "measurements": measurements_payload,
+        }
 
 
 @web.middleware
@@ -544,6 +713,13 @@ async def handle_bootstrap(request: web.Request) -> web.Response:
     return json_response(await service.get_bootstrap())
 
 
+async def handle_update_settings(request: web.Request) -> web.Response:
+    service: SolidSyncService = request.app["service"]
+    payload = await request.json()
+    settings = await service.update_settings(payload)
+    return json_response(settings)
+
+
 async def handle_create_profile(request: web.Request) -> web.Response:
     service: SolidSyncService = request.app["service"]
     payload = await request.json()
@@ -580,6 +756,7 @@ def create_app(service: SolidSyncService) -> web.Application:
     app["service"] = service
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/bootstrap", handle_bootstrap)
+    app.router.add_put("/api/settings", handle_update_settings)
     app.router.add_post("/api/profiles", handle_create_profile)
     app.router.add_put("/api/profiles/{profile_id}", handle_update_profile)
     app.router.add_delete("/api/profiles/{profile_id}", handle_delete_profile)
