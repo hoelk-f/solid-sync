@@ -4,6 +4,7 @@ slug: "solid_sync"
 description: "Sync Home Assistant sensor states to a Solid pod."
 url: "https://github.com/hoelk-f/solid-sync"
 startup: application
+init: false
 panel_title: "Solid"
 panel_icon: "mdi:database-sync"
 panel_admin: true

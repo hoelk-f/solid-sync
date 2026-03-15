@@ -3,10 +3,7 @@ FROM $BUILD_FROM
 
 WORKDIR /app
 
-RUN apk add --no-cache python3 py3-pip
-
-COPY requirements.txt /app/requirements.txt
-RUN pip3 install --no-cache-dir -r /app/requirements.txt
+RUN apk add --no-cache python3 py3-aiohttp
 
 COPY app /app
 COPY run.sh /run.sh
