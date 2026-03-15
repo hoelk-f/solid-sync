@@ -1,5 +1,4 @@
 const state = {
-  editingId: null,
   profiles: [],
   entities: [],
   settings: null,
@@ -20,9 +19,8 @@ const profileList = document.querySelector("#profile-list");
 const profileTemplate = document.querySelector("#profile-template");
 const formTitle = document.querySelector("#form-title");
 const submitButton = document.querySelector("#submit-button");
-const cancelEditButton = document.querySelector("#cancel-edit");
 const profileCount = document.querySelector("#profile-count");
-const serviceStatus = document.querySelector("#service-status");
+const pageStatus = document.querySelector("#page-status");
 const addMeasurementButton = document.querySelector("#add-measurement");
 const refreshEntitiesButton = document.querySelector("#refresh-entities");
 
@@ -59,32 +57,42 @@ async function request(path, options = {}) {
 }
 
 function setMessage(message, tone = "warn") {
-  serviceStatus.innerHTML = "";
-  const pill = document.createElement("span");
-  pill.className = `pill pill-${tone}`;
-  pill.textContent = message;
-  serviceStatus.appendChild(pill);
+  if (!message) {
+    clearMessage();
+    return;
+  }
+
+  pageStatus.hidden = false;
+  pageStatus.className = `page-status page-status-${tone}`;
+  pageStatus.textContent = message;
+}
+
+function clearMessage() {
+  pageStatus.hidden = true;
+  pageStatus.className = "page-status";
+  pageStatus.textContent = "";
 }
 
 function renderStatus() {
   if (!state.status) {
-    setMessage("No status", "warn");
+    setMessage("Unable to load add-on status.", "warn");
     return;
   }
 
-  const settingsText = state.status.settings_complete ? "settings saved" : "settings missing";
-  if (state.status.listener_connected) {
-    setMessage(
-      `Connected - ${state.status.profile_count} profile(s) - ${settingsText}`,
-      "ok"
-    );
+  if (!state.status.settings_complete) {
+    setMessage("Complete the Solid connection settings to start syncing.", "warn");
     return;
   }
 
-  const errorText = state.status.listener_last_error
-    ? ` - ${state.status.listener_last_error}`
-    : "";
-  setMessage(`Disconnected - ${settingsText}${errorText}`, "warn");
+  if (!state.status.listener_connected) {
+    const errorText = state.status.listener_last_error
+      ? ` ${state.status.listener_last_error}`
+      : "";
+    setMessage(`Home Assistant listener disconnected.${errorText}`, "warn");
+    return;
+  }
+
+  clearMessage();
 }
 
 function entityLabel(entityId) {
@@ -154,28 +162,12 @@ function fillSettingsForm(settings = {}) {
   document.querySelector("#settings_client_secret").value = settings.client_secret || "";
 }
 
-function fillProfileForm(profile = null) {
+function fillProfileForm() {
   profileForm.reset();
-
-  if (!profile) {
-    state.editingId = null;
-    formTitle.textContent = "New profile";
-    submitButton.textContent = "Save profile";
-    cancelEditButton.hidden = true;
-    document.querySelector("#write_mode").value = "single_file";
-    renderMeasurementRows(defaultMeasurements());
-    return;
-  }
-
-  state.editingId = profile.id;
-  formTitle.textContent = "Edit profile";
-  submitButton.textContent = "Update profile";
-  cancelEditButton.hidden = false;
-
-  document.querySelector("#name").value = profile.name;
-  document.querySelector("#resource_path").value = profile.resource_path;
-  document.querySelector("#write_mode").value = profile.write_mode || "single_file";
-  renderMeasurementRows(profile.measurements);
+  setSectionExpanded("profile-form", true);
+  formTitle.textContent = "New profile";
+  submitButton.textContent = "Save profile";
+  renderMeasurementRows(defaultMeasurements());
 }
 
 function profileTime(value) {
@@ -200,8 +192,6 @@ function renderProfiles() {
     const node = profileTemplate.content.cloneNode(true);
     node.querySelector(".profile-name").textContent = profile.name;
     node.querySelector(".profile-resource").textContent = profile.resource_path;
-    node.querySelector(".profile-write-mode").textContent =
-      profile.write_mode === "timestamped" ? "Timestamped snapshots" : "Single file";
     node.querySelector(".profile-last-resource").textContent =
       profile.last_resource_path || "No file written yet";
     node.querySelector(".profile-last-sync").textContent = profileTime(profile.last_sync_at);
@@ -215,9 +205,24 @@ function renderProfiles() {
       chips.appendChild(chip);
     }
 
-    node.querySelector(".action-edit").addEventListener("click", () => fillProfileForm(profile));
-    node.querySelector(".action-test").addEventListener("click", () => testProfile(profile.id));
-    node.querySelector(".action-delete").addEventListener("click", () => deleteProfile(profile.id));
+    node.querySelector(".action-test").addEventListener("click", async () => {
+      try {
+        setMessage("Running profile sync", "warn");
+        await testProfile(profile.id);
+        setMessage("Profile synced", "ok");
+      } catch (error) {
+        setMessage(error.message, "warn");
+      }
+    });
+    node.querySelector(".action-delete").addEventListener("click", async () => {
+      try {
+        setMessage("Deleting profile", "warn");
+        await deleteProfile(profile.id);
+        setMessage("Profile deleted", "ok");
+      } catch (error) {
+        setMessage(error.message, "warn");
+      }
+    });
 
     profileList.appendChild(node);
   }
@@ -260,9 +265,45 @@ function payloadFromProfileForm() {
   return {
     name: document.querySelector("#name").value.trim(),
     resource_path: document.querySelector("#resource_path").value.trim(),
-    write_mode: document.querySelector("#write_mode").value,
     measurements: collectMeasurements(),
   };
+}
+
+function setSectionExpanded(sectionName, expanded) {
+  const section = document.querySelector(`[data-section="${sectionName}"]`);
+  if (!section) {
+    return;
+  }
+
+  const toggle = section.querySelector("[data-section-toggle]");
+  const body = section.querySelector("[data-section-body]");
+  if (!toggle || !body) {
+    return;
+  }
+
+  toggle.setAttribute("aria-expanded", String(expanded));
+  toggle.querySelector(".toggle-indicator").textContent = expanded ? "-" : "+";
+  body.hidden = !expanded;
+  section.classList.toggle("is-collapsed", !expanded);
+}
+
+function initCollapsibleSections() {
+  document.querySelectorAll("[data-section]").forEach((section) => {
+    const toggle = section.querySelector("[data-section-toggle]");
+    const body = section.querySelector("[data-section-body]");
+    if (!toggle || !body) {
+      return;
+    }
+
+    setSectionExpanded(
+      section.getAttribute("data-section"),
+      toggle.getAttribute("aria-expanded") !== "false"
+    );
+    toggle.addEventListener("click", () => {
+      const expanded = toggle.getAttribute("aria-expanded") !== "true";
+      setSectionExpanded(section.getAttribute("data-section"), expanded);
+    });
+  });
 }
 
 async function loadBootstrap() {
@@ -290,18 +331,10 @@ async function saveSettings(event) {
 async function saveProfile(event) {
   event.preventDefault();
   const payload = payloadFromProfileForm();
-
-  if (state.editingId) {
-    await request(apiUrl(`profiles/${state.editingId}`), {
-      method: "PUT",
-      body: JSON.stringify(payload),
-    });
-  } else {
-    await request(apiUrl("profiles"), {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-  }
+  await request(apiUrl("profiles"), {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 
   await loadBootstrap();
   fillProfileForm();
@@ -310,9 +343,6 @@ async function saveProfile(event) {
 async function deleteProfile(profileId) {
   await request(apiUrl(`profiles/${profileId}`), { method: "DELETE" });
   await loadBootstrap();
-  if (state.editingId === profileId) {
-    fillProfileForm();
-  }
 }
 
 async function testProfile(profileId) {
@@ -340,8 +370,6 @@ profileForm.addEventListener("submit", async (event) => {
   }
 });
 
-cancelEditButton.addEventListener("click", () => fillProfileForm());
-
 addMeasurementButton.addEventListener("click", () => {
   createMeasurementRow({ key: "", entity_id: "" });
 });
@@ -355,6 +383,8 @@ refreshEntitiesButton.addEventListener("click", async () => {
     setMessage(error.message, "warn");
   }
 });
+
+initCollapsibleSections();
 
 loadBootstrap()
   .then(() => fillProfileForm())

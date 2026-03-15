@@ -11,114 +11,117 @@
       <section class="hero">
         <div>
           <p class="eyebrow">Solid Sync</p>
-          <h1>Sync data to your Solid pod.</h1>
-        </div>
-        <div class="hero-status" id="service-status">
-          <span class="pill pill-warn">Loading</span>
+          <h1>Sync to your Solid pod.</h1>
         </div>
       </section>
 
+      <div class="page-status" id="page-status" hidden></div>
+
       <section class="grid">
         <div class="editor-stack">
-          <article class="card">
+          <article class="card" data-section="settings">
             <div class="card-head">
               <div>
                 <p class="card-kicker">Solid Connection</p>
-                <h2>Stored once for all profiles</h2>
+                <button class="section-toggle" data-section-toggle type="button" aria-expanded="true">
+                  <span class="toggle-indicator" aria-hidden="true">-</span>
+                  <span>Stored once for all profiles</span>
+                </button>
               </div>
             </div>
 
-            <form id="settings-form">
-              <label>
-                <span>OIDC issuer URL</span>
-                <input id="settings_oidc_url" name="oidc_url" type="url" placeholder="https://issuer.example" required />
-              </label>
+            <div class="card-body" data-section-body>
+              <form id="settings-form">
+                <label>
+                  <span>OIDC issuer URL</span>
+                  <input id="settings_oidc_url" name="oidc_url" type="url" placeholder="https://issuer.example" required />
+                </label>
 
-              <label>
-                <span>POD URL</span>
-                <input id="settings_pod_url" name="pod_url" type="url" placeholder="https://pod.example/user" required />
-              </label>
+                <label>
+                  <span>POD URL</span>
+                  <input id="settings_pod_url" name="pod_url" type="url" placeholder="https://pod.example/user" required />
+                </label>
 
-              <label>
-                <span>Client token</span>
-                <input id="settings_client_token" name="client_token" type="text" required />
-              </label>
+                <label>
+                  <span>Client token</span>
+                  <input id="settings_client_token" name="client_token" type="text" required />
+                </label>
 
-              <label>
-                <span>Client secret</span>
-                <input id="settings_client_secret" name="client_secret" type="password" required />
-              </label>
+                <label>
+                  <span>Client secret</span>
+                  <input id="settings_client_secret" name="client_secret" type="password" required />
+                </label>
 
-              <div class="actions">
-                <button class="primary" type="submit">Save Solid settings</button>
-              </div>
-            </form>
+                <div class="actions">
+                  <button class="primary" type="submit">Save Solid settings</button>
+                </div>
+              </form>
+            </div>
           </article>
 
-          <article class="card form-card">
+          <article class="card form-card" data-section="profile-form">
             <div class="card-head">
               <div>
                 <p class="card-kicker">Station Profile</p>
-                <h2 id="form-title">New profile</h2>
+                <button class="section-toggle" data-section-toggle type="button" aria-expanded="true">
+                  <span class="toggle-indicator" aria-hidden="true">-</span>
+                  <span id="form-title">New profile</span>
+                </button>
               </div>
-              <button class="ghost" id="cancel-edit" type="button" hidden>
-                Cancel edit
-              </button>
             </div>
 
-            <form id="profile-form">
-              <label>
-                <span>Name</span>
-                <input id="name" name="name" type="text" placeholder="Garden weather station" required />
-              </label>
+            <div class="card-body" data-section-body>
+              <form id="profile-form">
+                <label>
+                  <span>Name</span>
+                  <input id="name" name="name" type="text" placeholder="Garden weather station" required />
+                </label>
 
-              <label>
-                <span>Resource base path</span>
-                <input id="resource_path" name="resource_path" type="text" placeholder="weather-stations/garden" required />
-                <small class="helper">Choose whether this path is overwritten or whether timestamped files are created below it.</small>
-              </label>
+                <label>
+                  <span>Resource path</span>
+                  <input id="resource_path" name="resource_path" type="text" placeholder="weather-stations/garden.json" required />
+                  <small class="helper">New snapshots are appended to this JSON file.</small>
+                </label>
 
-              <label>
-                <span>Write mode</span>
-                <select id="write_mode" name="write_mode">
-                  <option value="single_file">Single file</option>
-                  <option value="timestamped">Timestamped snapshots</option>
-                </select>
-              </label>
-
-              <div class="measurements-block">
-                <div class="section-head">
-                  <div>
-                    <p class="card-kicker">Measurements</p>
-                    <h3>Map multiple entities into one resource</h3>
+                <div class="measurements-block">
+                  <div class="section-head">
+                    <div>
+                      <p class="card-kicker">Measurements</p>
+                      <h3>Map multiple entities into one resource</h3>
+                    </div>
+                    <div class="actions">
+                      <button class="ghost" type="button" id="add-measurement">Add measurement</button>
+                      <button class="ghost" type="button" id="refresh-entities">Refresh entities</button>
+                    </div>
                   </div>
-                  <div class="actions">
-                    <button class="ghost" type="button" id="add-measurement">Add measurement</button>
-                    <button class="ghost" type="button" id="refresh-entities">Refresh entities</button>
-                  </div>
+
+                  <div id="measurement-list" class="measurement-list"></div>
                 </div>
 
-                <div id="measurement-list" class="measurement-list"></div>
-              </div>
-
-              <div class="actions">
-                <button class="primary" type="submit" id="submit-button">Save profile</button>
-              </div>
-            </form>
+                <div class="actions">
+                  <button class="primary" type="submit" id="submit-button">Save profile</button>
+                </div>
+              </form>
+            </div>
           </article>
         </div>
 
-        <article class="card profiles-card">
+        <article class="card profiles-card" data-section="profiles">
           <div class="card-head">
             <div>
               <p class="card-kicker">Profiles</p>
-              <h2>Station snapshots</h2>
+              <button class="section-toggle" data-section-toggle type="button" aria-expanded="true">
+                <span class="toggle-indicator" aria-hidden="true">-</span>
+                <span>Station snapshots</span>
+              </button>
             </div>
             <span class="count" id="profile-count">0</span>
           </div>
 
-          <div class="profile-list" id="profile-list">
-            <p class="empty">No profiles configured yet.</p>
+          <div class="card-body" data-section-body>
+            <div class="profile-list" id="profile-list">
+              <p class="empty">No profiles configured yet.</p>
+            </div>
           </div>
         </article>
       </section>
@@ -151,10 +154,6 @@
 
         <dl class="profile-meta">
           <div>
-            <dt>Write mode</dt>
-            <dd class="profile-write-mode"></dd>
-          </div>
-          <div>
             <dt>Last file</dt>
             <dd class="profile-last-resource"></dd>
           </div>
@@ -169,7 +168,6 @@
         </dl>
 
         <div class="profile-actions">
-          <button class="ghost action-edit" type="button">Edit</button>
           <button class="ghost action-test" type="button">Test now</button>
           <button class="danger action-delete" type="button">Delete</button>
         </div>

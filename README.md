@@ -12,29 +12,36 @@ archive/                 Archived custom-integration prototype
 
 ## What the add-on does
 
-- adds a `Solid` sidebar entry via ingress
+- adds a `Solid Sync` sidebar entry via ingress
 - stores Solid connection settings once for all profiles
 - lets you create multiple sync profiles in the web UI
 - lets each profile combine multiple entities into one snapshot
 - subscribes to Home Assistant `state_changed` events
-- can either overwrite one Solid file or write timestamped snapshot resources
+- appends each new snapshot into one Solid JSON file per profile
+- creates missing parent containers in the Solid pod before writing
 
 Current payload shape:
 
 ```json
 {
   "profile": "Garden weather station",
-  "captured_at": "2026-03-15T16:42:01.284991+00:00",
-  "measurements": {
-    "temperature": {
-      "entity_id": "sensor.garden_temperature",
-      "state": "23.4"
-    },
-    "humidity": {
-      "entity_id": "sensor.garden_humidity",
-      "state": "48"
+  "resource_path": "weather-stations/garden.json",
+  "updated_at": "2026-03-15T16:42:01.284991+00:00",
+  "entries": [
+    {
+      "captured_at": "2026-03-15T16:42:01.284991+00:00",
+      "measurements": {
+        "temperature": {
+          "entity_id": "sensor.garden_temperature",
+          "state": "23.4"
+        },
+        "humidity": {
+          "entity_id": "sensor.garden_humidity",
+          "state": "48"
+        }
+      }
     }
-  }
+  ]
 }
 ```
 

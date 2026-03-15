@@ -15,7 +15,7 @@ import aiohttp
 from aiohttp import WSMsgType, web
 
 CONFIG_PATH = Path("/data/solid-sync.json")
-CONFIG_SCHEMA_VERSION = 2
+CONFIG_SCHEMA_VERSION = 3
 HA_API_BASE = "http://supervisor/core/api"
 HA_WS_URL = "ws://supervisor/core/websocket"
 INGRESS_PORT = 8099
@@ -29,11 +29,6 @@ def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def resource_timestamp() -> str:
-    now = datetime.now(timezone.utc)
-    return now.strftime("%Y-%m-%dT%H-%M-%S") + f".{now.microsecond:06d}Z"
-
-
 def normalize_measurement_key(value: str) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9_]+", "_", value.strip().lower()).strip("_")
     return normalized
@@ -42,18 +37,6 @@ def normalize_measurement_key(value: str) -> str:
 def default_measurement_key(entity_id: str) -> str:
     object_id = entity_id.split(".", 1)[-1]
     return normalize_measurement_key(object_id) or "value"
-
-
-def build_timestamped_resource_path(base_path: str) -> str:
-    normalized = base_path.strip().strip("/")
-    if not normalized:
-        raise RuntimeError("Resource path is empty")
-
-    timestamp = resource_timestamp()
-    if normalized.lower().endswith(".json"):
-        return f"{normalized[:-5]}--{timestamp}.json"
-
-    return f"{normalized}/{timestamp}.json"
 
 
 @dataclass
@@ -85,7 +68,6 @@ class SyncProfile:
     id: str
     name: str
     resource_path: str
-    write_mode: str = "single_file"
     measurements: list[SyncMeasurement] = field(default_factory=list)
     last_sync_at: str | None = None
     last_error: str | None = None
@@ -152,12 +134,155 @@ class SolidOIDCClient:
 
             return access_token
 
-    async def put_json(self, resource_path: str, payload: dict[str, Any]) -> None:
-        access_token = await self._authenticate()
-        target = resource_path.lstrip("/")
-        url = self._pod_url if not target else f"{self._pod_url}/{target}"
+    async def get_access_token(self) -> str:
+        return await self._authenticate()
+
+    def _build_resource_url(self, resource_path: str) -> str:
+        target = self._normalize_resource_path(resource_path)
+        return self._pod_url if not target else f"{self._pod_url}/{target}"
+
+    def _build_container_url(self, container_path: str = "") -> str:
+        target = container_path.strip().strip("/")
+        base = f"{self._pod_url}/"
+        return base if not target else f"{base}{target}/"
+
+    def _normalize_resource_path(self, resource_path: str) -> str:
+        target = resource_path.strip().strip("/")
+        if not target:
+            raise RuntimeError("Resource path is empty")
+        return target
+
+    async def ensure_parent_containers(
+        self,
+        resource_path: str,
+        access_token: str | None = None,
+    ) -> None:
+        target = self._normalize_resource_path(resource_path)
+        segments = target.split("/")
+        if len(segments) < 2:
+            return
+
+        token = access_token or await self._authenticate()
+        current_path = ""
+        for segment in segments[:-1]:
+            current_path = f"{current_path}/{segment}" if current_path else segment
+            await self._ensure_container(current_path, token)
+
+    async def _ensure_container(self, container_path: str, access_token: str) -> None:
+        container_url = self._build_container_url(container_path)
+        if await self._container_exists(container_url, access_token):
+            return
+
+        parent_parts = container_path.split("/")[:-1]
+        parent_url = self._build_container_url("/".join(parent_parts))
+        slug = container_path.split("/")[-1]
         headers = {
             "Authorization": f"Bearer {access_token}",
+            "Content-Type": "text/turtle",
+            "Link": '<http://www.w3.org/ns/ldp#BasicContainer>; rel="type"',
+            "Slug": slug,
+        }
+        body = (
+            "@prefix ldp: <http://www.w3.org/ns/ldp#>.\n"
+            "<> a ldp:Container, ldp:BasicContainer .\n"
+        )
+
+        async with self._session.post(parent_url, data=body, headers=headers) as response:
+            if response.status in SUCCESS_STATUSES:
+                return
+            if response.status == 409 and await self._container_exists(
+                container_url, access_token
+            ):
+                return
+
+            body_text = await response.text()
+            raise RuntimeError(
+                f"Solid container creation failed for {container_path}: "
+                f"{response.status} {body_text}"
+            )
+
+    async def _container_exists(self, container_url: str, access_token: str) -> bool:
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "text/turtle, application/ld+json, application/json;q=0.9, */*;q=0.1",
+        }
+
+        async with self._session.head(
+            container_url,
+            headers=headers,
+            allow_redirects=True,
+        ) as response:
+            if response.status in SUCCESS_STATUSES or response.status == 200:
+                return True
+            if response.status == 404:
+                return False
+            if response.status not in {400, 405, 501}:
+                body_text = await response.text()
+                raise RuntimeError(
+                    f"Solid container probe failed for {container_url}: "
+                    f"{response.status} {body_text}"
+                )
+
+        async with self._session.get(
+            container_url,
+            headers=headers,
+            allow_redirects=True,
+        ) as response:
+            if response.status in SUCCESS_STATUSES or response.status == 200:
+                return True
+            if response.status == 404:
+                return False
+
+            body_text = await response.text()
+            raise RuntimeError(
+                f"Solid container probe failed for {container_url}: "
+                f"{response.status} {body_text}"
+            )
+
+    async def get_json(
+        self,
+        resource_path: str,
+        access_token: str | None = None,
+    ) -> Any | None:
+        token = access_token or await self._authenticate()
+        url = self._build_resource_url(resource_path)
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+        }
+
+        async with self._session.get(url, headers=headers) as response:
+            if response.status == 404:
+                return None
+            if response.status == 204:
+                return None
+            if response.status != 200:
+                body = await response.text()
+                raise RuntimeError(
+                    f"Solid GET failed with status {response.status}: {body}"
+                )
+
+            body = await response.text()
+            if not body.strip():
+                return None
+
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError as err:
+            raise RuntimeError(
+                "Solid resource is not valid JSON and cannot be appended"
+            ) from err
+
+    async def put_json(
+        self,
+        resource_path: str,
+        payload: dict[str, Any],
+        access_token: str | None = None,
+    ) -> None:
+        token = access_token or await self._authenticate()
+        url = self._build_resource_url(resource_path)
+        headers = {
+            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         }
 
@@ -176,6 +301,7 @@ class SolidSyncService:
         self._profiles: dict[str, SyncProfile] = {}
         self._client: SolidOIDCClient | None = None
         self._config_lock = asyncio.Lock()
+        self._profile_locks: dict[str, asyncio.Lock] = {}
         self._shutdown_event = asyncio.Event()
         self._listener_task: asyncio.Task[None] | None = None
         self._listener_connected = False
@@ -279,6 +405,7 @@ class SolidSyncService:
         profile = self._build_profile(payload)
         async with self._config_lock:
             self._profiles[profile.id] = profile
+            self._profile_locks.setdefault(profile.id, asyncio.Lock())
             await self._save_config()
         LOGGER.info("Created profile %s with %s measurements", profile.name, len(profile.measurements))
         return asdict(profile)
@@ -294,6 +421,7 @@ class SolidSyncService:
         profile = self._build_profile(payload, profile_id=profile_id, existing=existing)
         async with self._config_lock:
             self._profiles[profile.id] = profile
+            self._profile_locks.setdefault(profile.id, asyncio.Lock())
             await self._save_config()
         LOGGER.info("Updated profile %s", profile.name)
         return asdict(profile)
@@ -303,6 +431,7 @@ class SolidSyncService:
             if profile_id not in self._profiles:
                 raise web.HTTPNotFound(text="Profile not found")
             removed = self._profiles.pop(profile_id)
+            self._profile_locks.pop(profile_id, None)
             await self._save_config()
         LOGGER.info("Deleted profile %s", removed.name)
 
@@ -320,6 +449,7 @@ class SolidSyncService:
                 self._settings = SolidSettings()
                 self._profiles = {}
                 self._client = None
+                self._profile_locks = {}
                 return
 
             raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -332,10 +462,14 @@ class SolidSyncService:
             )
             self._profiles = {}
             self._client = None
+            self._profile_locks = {}
 
             for item in raw.get("profiles", []):
                 profile = self._profile_from_dict(item)
                 self._profiles[profile.id] = profile
+                self._profile_locks[profile.id] = self._profile_locks.get(
+                    profile.id, asyncio.Lock()
+                )
 
     def _migrate_settings(self, raw: dict[str, Any]) -> dict[str, str]:
         profiles = raw.get("profiles", [])
@@ -374,8 +508,6 @@ class SolidSyncService:
             id=str(item.get("id", uuid.uuid4())),
             name=str(item.get("name", "")).strip(),
             resource_path=str(item.get("resource_path", "")).strip(),
-            write_mode=str(item.get("write_mode", "timestamped")).strip()
-            or "timestamped",
             measurements=measurements,
             last_sync_at=item.get("last_sync_at"),
             last_error=item.get("last_error"),
@@ -428,7 +560,6 @@ class SolidSyncService:
     ) -> SyncProfile:
         name = str(payload.get("name", "")).strip()
         resource_path = str(payload.get("resource_path", "")).strip()
-        write_mode = str(payload.get("write_mode", "single_file")).strip() or "single_file"
         measurements_payload = payload.get("measurements")
 
         if not isinstance(measurements_payload, list):
@@ -464,14 +595,11 @@ class SolidSyncService:
             )
         if not measurements:
             raise web.HTTPBadRequest(text="At least one measurement is required")
-        if write_mode not in {"single_file", "timestamped"}:
-            raise web.HTTPBadRequest(text="write_mode must be single_file or timestamped")
 
         return SyncProfile(
             id=profile_id or str(uuid.uuid4()),
             name=name,
             resource_path=resource_path,
-            write_mode=write_mode,
             measurements=measurements,
             last_sync_at=existing.last_sync_at if existing else None,
             last_error=existing.last_error if existing else None,
@@ -522,6 +650,9 @@ class SolidSyncService:
 
     def _ha_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._supervisor_token}"}
+
+    def _get_profile_lock(self, profile_id: str) -> asyncio.Lock:
+        return self._profile_locks.setdefault(profile_id, asyncio.Lock())
 
     async def _run_listener(self) -> None:
         backoff_seconds = 5
@@ -610,41 +741,53 @@ class SolidSyncService:
             await self._sync_profile(profile_id, suppress_errors=True)
 
     async def _sync_profile(self, profile_id: str, suppress_errors: bool) -> None:
-        async with self._config_lock:
-            profile = self._profiles.get(profile_id)
+        async with self._get_profile_lock(profile_id):
+            async with self._config_lock:
+                profile = self._profiles.get(profile_id)
 
-        if not profile:
-            return
+            if not profile:
+                return
 
-        try:
-            snapshot = await self._build_snapshot(profile)
-            target_path = (
-                profile.resource_path
-                if profile.write_mode == "single_file"
-                else build_timestamped_resource_path(profile.resource_path)
-            )
-            client = self._get_client()
-            await client.put_json(target_path, snapshot)
-        except Exception as err:
+            try:
+                snapshot = await self._build_snapshot(profile)
+                client = self._get_client()
+                access_token = await client.get_access_token()
+                await client.ensure_parent_containers(
+                    profile.resource_path,
+                    access_token=access_token,
+                )
+                document = await self._build_appended_document(
+                    client,
+                    profile,
+                    snapshot,
+                    access_token=access_token,
+                )
+                target_path = profile.resource_path
+                await client.put_json(
+                    target_path,
+                    document,
+                    access_token=access_token,
+                )
+            except Exception as err:
+                async with self._config_lock:
+                    current = self._profiles.get(profile_id)
+                    if current:
+                        current.last_error = str(err)
+                        await self._save_config()
+                LOGGER.error("Profile %s sync failed: %s", profile.name, err)
+                if not suppress_errors:
+                    raise
+                return
+
             async with self._config_lock:
                 current = self._profiles.get(profile_id)
                 if current:
-                    current.last_error = str(err)
+                    current.last_sync_at = snapshot["captured_at"]
+                    current.last_error = None
+                    current.last_resource_path = target_path
                     await self._save_config()
-            LOGGER.error("Profile %s sync failed: %s", profile.name, err)
-            if not suppress_errors:
-                raise
-            return
 
-        async with self._config_lock:
-            current = self._profiles.get(profile_id)
-            if current:
-                current.last_sync_at = snapshot["captured_at"]
-                current.last_error = None
-                current.last_resource_path = target_path
-                await self._save_config()
-
-        LOGGER.info("Synced profile %s to %s", profile.name, target_path)
+            LOGGER.info("Synced profile %s to %s", profile.name, target_path)
 
     async def _build_snapshot(self, profile: SyncProfile) -> dict[str, Any]:
         states = await asyncio.gather(
@@ -673,9 +816,82 @@ class SolidSyncService:
             )
 
         return {
-            "profile": profile.name,
             "captured_at": utcnow(),
             "measurements": measurements_payload,
+        }
+
+    async def _build_appended_document(
+        self,
+        client: SolidOIDCClient,
+        profile: SyncProfile,
+        snapshot: dict[str, Any],
+        access_token: str | None = None,
+    ) -> dict[str, Any]:
+        existing = await client.get_json(
+            profile.resource_path,
+            access_token=access_token,
+        )
+        entries = self._extract_existing_entries(existing)
+        entries.append(snapshot)
+        return {
+            "profile": profile.name,
+            "resource_path": profile.resource_path,
+            "updated_at": snapshot["captured_at"],
+            "entries": entries,
+        }
+
+    def _extract_existing_entries(self, existing: Any) -> list[dict[str, Any]]:
+        if existing is None:
+            return []
+
+        if isinstance(existing, dict):
+            raw_entries = existing.get("entries")
+            if isinstance(raw_entries, list):
+                entries = self._normalize_entries(raw_entries)
+                if not entries and raw_entries:
+                    raise RuntimeError(
+                        "Existing Solid resource contains unsupported entry data"
+                    )
+                return entries
+
+            legacy_entry = self._normalize_snapshot_entry(existing)
+            if legacy_entry:
+                return [legacy_entry]
+
+            raise RuntimeError(
+                "Existing Solid resource must be a snapshot object or a document with entries"
+            )
+
+        if isinstance(existing, list):
+            entries = self._normalize_entries(existing)
+            if not entries and existing:
+                raise RuntimeError(
+                    "Existing Solid resource contains unsupported entry data"
+                )
+            return entries
+
+        raise RuntimeError("Existing Solid resource must be a JSON object or array")
+
+    def _normalize_entries(self, entries: list[Any]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in entries:
+            entry = self._normalize_snapshot_entry(item)
+            if entry:
+                normalized.append(entry)
+        return normalized
+
+    def _normalize_snapshot_entry(self, item: Any) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+
+        captured_at = str(item.get("captured_at", "")).strip()
+        measurements = item.get("measurements")
+        if not captured_at or not isinstance(measurements, dict):
+            return None
+
+        return {
+            "captured_at": captured_at,
+            "measurements": measurements,
         }
 
 
