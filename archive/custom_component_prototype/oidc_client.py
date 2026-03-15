@@ -1,4 +1,4 @@
-"""OIDC Client for SOLID Home Assistant integration, version 2."""
+"""OIDC Client for Solid Home Assistant integration, version 2."""
 
 import logging
 
@@ -9,7 +9,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 class SolidOIDCClient:
-    """Handle OIDC client operations for the SOLID integration."""
+    """Handle OIDC client operations for the Solid integration."""
 
     def __init__(
         self, hass: HomeAssistant, oidc_url, pod_url, client_token, client_secret
@@ -65,7 +65,7 @@ class SolidOIDCClient:
             return token_data.get("access_token")
 
     async def get(self, resource) -> str | None:
-        """Retrieve a resource from the SOLID pod."""
+        """Retrieve a resource from the Solid pod."""
         token = await self._authenticate()
         if not token:
             LOGGER.error("Failed to authenticate")
@@ -80,7 +80,7 @@ class SolidOIDCClient:
             return await response.text()
 
     async def post(self, resource, data) -> None:
-        """Post data to a resource in the SOLID pod."""
+        """Post data to a resource in the Solid pod."""
         token = await self._authenticate()
         if not token:
             LOGGER.error("Failed to authenticate")
@@ -99,7 +99,7 @@ class SolidOIDCClient:
             return
 
     async def put(self, resource, data) -> None:
-        """Put data to a resource in the SOLID pod."""
+        """Put data to a resource in the Solid pod."""
         token = await self._authenticate()
         if not token:
             LOGGER.error("Failed to authenticate")

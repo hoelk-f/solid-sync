@@ -1,4 +1,4 @@
-"""Config flow for the SOLID integration."""
+"""Config flow for the Solid integration."""
 
 import voluptuous as vol
 

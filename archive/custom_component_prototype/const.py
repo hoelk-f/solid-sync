@@ -1,3 +1,3 @@
-"""Constants for the SOLID integration."""
+"""Constants for the Solid integration."""
 
 DOMAIN = "solid"

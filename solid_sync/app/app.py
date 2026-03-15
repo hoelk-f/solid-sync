@@ -115,7 +115,7 @@ class SolidOIDCClient:
             if response.status not in SUCCESS_STATUSES:
                 body = await response.text()
                 raise RuntimeError(
-                    f"SOLID PUT failed with status {response.status}: {body}"
+                    f"Solid PUT failed with status {response.status}: {body}"
                 )
 
 
@@ -140,7 +140,7 @@ class SolidSyncService:
         self._session = aiohttp.ClientSession(timeout=timeout)
         await self._load_profiles()
         self._listener_task = asyncio.create_task(self._run_listener(), name="ha-listener")
-        LOGGER.info("SOLID Sync service started with %s profile(s)", len(self._profiles))
+        LOGGER.info("Solid Sync service started with %s profile(s)", len(self._profiles))
 
     async def stop(self) -> None:
         self._shutdown_event.set()
@@ -155,10 +155,10 @@ class SolidSyncService:
         if self._session:
             await self._session.close()
 
-        LOGGER.info("SOLID Sync service stopped")
+        LOGGER.info("Solid Sync service stopped")
 
     def _configure_logging(self) -> None:
-        level_name = os.environ.get("SOLID_LOG_LEVEL", "INFO").upper()
+        level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
         levels = {
             "TRACE": logging.DEBUG,
             "DEBUG": logging.DEBUG,
@@ -503,7 +503,7 @@ class SolidSyncService:
 async def ingress_only_middleware(
     request: web.Request, handler: web.RequestHandler
 ) -> web.StreamResponse:
-    allow_direct = os.environ.get("SOLID_ALLOW_DIRECT", "").lower() in {"1", "true", "yes"}
+    allow_direct = os.environ.get("ALLOW_DIRECT", "").lower() in {"1", "true", "yes"}
     if allow_direct:
         return await handler(request)
 

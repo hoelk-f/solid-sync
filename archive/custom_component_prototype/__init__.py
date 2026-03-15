@@ -1,4 +1,4 @@
-"""SOLID integration for Home Assistant."""
+"""Solid integration for Home Assistant."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up SOLID login from a config entry."""
+    """Set up Solid login from a config entry."""
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = dict(entry.data)

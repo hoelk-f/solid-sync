@@ -1,4 +1,4 @@
-"""Sensor listener for the SOLID integration."""
+"""Sensor listener for the Solid integration."""
 
 from __future__ import annotations
 
