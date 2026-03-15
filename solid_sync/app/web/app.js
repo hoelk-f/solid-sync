@@ -162,6 +162,7 @@ function fillProfileForm(profile = null) {
     formTitle.textContent = "New profile";
     submitButton.textContent = "Save profile";
     cancelEditButton.hidden = true;
+    document.querySelector("#write_mode").value = "single_file";
     renderMeasurementRows(defaultMeasurements());
     return;
   }
@@ -173,6 +174,7 @@ function fillProfileForm(profile = null) {
 
   document.querySelector("#name").value = profile.name;
   document.querySelector("#resource_path").value = profile.resource_path;
+  document.querySelector("#write_mode").value = profile.write_mode || "single_file";
   renderMeasurementRows(profile.measurements);
 }
 
@@ -198,6 +200,8 @@ function renderProfiles() {
     const node = profileTemplate.content.cloneNode(true);
     node.querySelector(".profile-name").textContent = profile.name;
     node.querySelector(".profile-resource").textContent = profile.resource_path;
+    node.querySelector(".profile-write-mode").textContent =
+      profile.write_mode === "timestamped" ? "Timestamped snapshots" : "Single file";
     node.querySelector(".profile-last-resource").textContent =
       profile.last_resource_path || "No file written yet";
     node.querySelector(".profile-last-sync").textContent = profileTime(profile.last_sync_at);
@@ -256,6 +260,7 @@ function payloadFromProfileForm() {
   return {
     name: document.querySelector("#name").value.trim(),
     resource_path: document.querySelector("#resource_path").value.trim(),
+    write_mode: document.querySelector("#write_mode").value,
     measurements: collectMeasurements(),
   };
 }

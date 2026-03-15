@@ -11,11 +11,7 @@
       <section class="hero">
         <div>
           <p class="eyebrow">Solid Sync</p>
-          <h1>Sync station snapshots to your Solid pod.</h1>
-          <p class="lede">
-            Save your Solid connection once, then build station-style profiles
-            with multiple measurements per resource.
-          </p>
+          <h1>Sync data to your Solid pod.</h1>
         </div>
         <div class="hero-status" id="service-status">
           <span class="pill pill-warn">Loading</span>
@@ -79,7 +75,15 @@
               <label>
                 <span>Resource base path</span>
                 <input id="resource_path" name="resource_path" type="text" placeholder="weather-stations/garden" required />
-                <small class="helper">Each sync creates a new file below this path using a timestamp.</small>
+                <small class="helper">Choose whether this path is overwritten or whether timestamped files are created below it.</small>
+              </label>
+
+              <label>
+                <span>Write mode</span>
+                <select id="write_mode" name="write_mode">
+                  <option value="single_file">Single file</option>
+                  <option value="timestamped">Timestamped snapshots</option>
+                </select>
               </label>
 
               <div class="measurements-block">
@@ -146,6 +150,10 @@
         <div class="chip-list profile-measurements"></div>
 
         <dl class="profile-meta">
+          <div>
+            <dt>Write mode</dt>
+            <dd class="profile-write-mode"></dd>
+          </div>
           <div>
             <dt>Last file</dt>
             <dd class="profile-last-resource"></dd>

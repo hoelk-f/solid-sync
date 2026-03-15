@@ -85,6 +85,7 @@ class SyncProfile:
     id: str
     name: str
     resource_path: str
+    write_mode: str = "single_file"
     measurements: list[SyncMeasurement] = field(default_factory=list)
     last_sync_at: str | None = None
     last_error: str | None = None
@@ -373,6 +374,8 @@ class SolidSyncService:
             id=str(item.get("id", uuid.uuid4())),
             name=str(item.get("name", "")).strip(),
             resource_path=str(item.get("resource_path", "")).strip(),
+            write_mode=str(item.get("write_mode", "timestamped")).strip()
+            or "timestamped",
             measurements=measurements,
             last_sync_at=item.get("last_sync_at"),
             last_error=item.get("last_error"),
@@ -425,6 +428,7 @@ class SolidSyncService:
     ) -> SyncProfile:
         name = str(payload.get("name", "")).strip()
         resource_path = str(payload.get("resource_path", "")).strip()
+        write_mode = str(payload.get("write_mode", "single_file")).strip() or "single_file"
         measurements_payload = payload.get("measurements")
 
         if not isinstance(measurements_payload, list):
@@ -460,11 +464,14 @@ class SolidSyncService:
             )
         if not measurements:
             raise web.HTTPBadRequest(text="At least one measurement is required")
+        if write_mode not in {"single_file", "timestamped"}:
+            raise web.HTTPBadRequest(text="write_mode must be single_file or timestamped")
 
         return SyncProfile(
             id=profile_id or str(uuid.uuid4()),
             name=name,
             resource_path=resource_path,
+            write_mode=write_mode,
             measurements=measurements,
             last_sync_at=existing.last_sync_at if existing else None,
             last_error=existing.last_error if existing else None,
@@ -611,7 +618,11 @@ class SolidSyncService:
 
         try:
             snapshot = await self._build_snapshot(profile)
-            target_path = build_timestamped_resource_path(profile.resource_path)
+            target_path = (
+                profile.resource_path
+                if profile.write_mode == "single_file"
+                else build_timestamped_resource_path(profile.resource_path)
+            )
             client = self._get_client()
             await client.put_json(target_path, snapshot)
         except Exception as err:

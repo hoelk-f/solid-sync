@@ -8,13 +8,14 @@ This add-on mirrors Home Assistant entity snapshots into a Solid pod.
 - Global Solid connection settings stored once
 - Multiple sync profiles
 - Multiple measurements per profile
+- Per profile write mode: single file or timestamped snapshots
 - OIDC client-credentials authentication
 - Live subscription to Home Assistant `state_changed` events
 - Manual test trigger per profile
 
 ## Current payload model
 
-Each sync writes one new timestamped JSON resource below the configured base path:
+Each profile can either overwrite one fixed file or write timestamped JSON resources below the configured base path:
 
 ```json
 {
@@ -39,7 +40,7 @@ Each sync writes one new timestamped JSON resource below the configured base pat
 }
 ```
 
-For a base path like `weather-stations/garden`, each sync writes a new file such as:
+For timestamped mode and a base path like `weather-stations/garden`, each sync writes a new file such as:
 
 ```text
 weather-stations/garden/2026-03-15T16-42-01.284991Z.json
@@ -50,7 +51,7 @@ weather-stations/garden/2026-03-15T16-42-01.284991Z.json
 1. Install and start the add-on.
 2. Open the web UI via the `Solid` sidebar entry or `Open Web UI`.
 3. Save your Solid connection settings once at the top of the page.
-4. Create one or more profiles with a resource base path and multiple measurement mappings.
+4. Create one or more profiles with a resource base path, a write mode and multiple measurement mappings.
 
 ## Notes
 

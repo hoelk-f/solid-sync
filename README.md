@@ -17,7 +17,7 @@ archive/                 Archived custom-integration prototype
 - lets you create multiple sync profiles in the web UI
 - lets each profile combine multiple entities into one snapshot
 - subscribes to Home Assistant `state_changed` events
-- writes each snapshot to a new timestamped Solid resource
+- can either overwrite one Solid file or write timestamped snapshot resources
 
 Current payload shape:
 

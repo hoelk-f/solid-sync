@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+- Add-on version bump for proper Home Assistant update detection
+- Profiles can now write either a single file or timestamped snapshots
+- UI refined with subtler dark mode styling and a simpler header
+- Profiles are always active and can only be deleted
+
 ## 0.2.0
 
 - Global Solid connection settings stored once for all profiles
