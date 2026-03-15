@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SOLID Sync</title>
+    <link rel="stylesheet" href="static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">SOLID Sync</p>
+          <h1>Mirror Home Assistant sensors into your SOLID pod.</h1>
+          <p class="lede">
+            Create sync profiles, test them directly, and monitor the live
+            connection to Home Assistant from one place.
+          </p>
+        </div>
+        <div class="hero-status" id="service-status">
+          <span class="pill pill-warn">Loading</span>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="card form-card">
+          <div class="card-head">
+            <div>
+              <p class="card-kicker">Configuration</p>
+              <h2 id="form-title">New profile</h2>
+            </div>
+            <button class="ghost" id="cancel-edit" type="button" hidden>
+              Cancel edit
+            </button>
+          </div>
+
+          <form id="profile-form">
+            <label>
+              <span>Name</span>
+              <input id="name" name="name" type="text" placeholder="Living room temperature" required />
+            </label>
+
+            <label>
+              <span>Sensor</span>
+              <select id="sensor_entity_id" name="sensor_entity_id" required></select>
+            </label>
+
+            <label>
+              <span>OIDC issuer URL</span>
+              <input id="oidc_url" name="oidc_url" type="url" placeholder="https://issuer.example" required />
+            </label>
+
+            <label>
+              <span>POD URL</span>
+              <input id="pod_url" name="pod_url" type="url" placeholder="https://pod.example/user" required />
+            </label>
+
+            <label>
+              <span>Client token</span>
+              <input id="client_token" name="client_token" type="text" required />
+            </label>
+
+            <label>
+              <span>Client secret</span>
+              <input id="client_secret" name="client_secret" type="password" required />
+            </label>
+
+            <label>
+              <span>Resource path in the pod</span>
+              <input id="resource_path" name="resource_path" type="text" placeholder="sensor.living_room_temperature" />
+            </label>
+
+            <label class="switch-row">
+              <input id="enabled" name="enabled" type="checkbox" checked />
+              <span>Profile enabled</span>
+            </label>
+
+            <div class="actions">
+              <button class="primary" type="submit" id="submit-button">Save profile</button>
+              <button class="ghost" type="button" id="refresh-sensors">Refresh sensors</button>
+            </div>
+          </form>
+        </article>
+
+        <article class="card">
+          <div class="card-head">
+            <div>
+              <p class="card-kicker">Profiles</p>
+              <h2>Active sync definitions</h2>
+            </div>
+            <span class="count" id="profile-count">0</span>
+          </div>
+
+          <div class="profile-list" id="profile-list">
+            <p class="empty">No profiles configured yet.</p>
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <template id="profile-template">
+      <article class="profile-card">
+        <div class="profile-top">
+          <div>
+            <h3 class="profile-name"></h3>
+            <p class="profile-sensor"></p>
+          </div>
+          <span class="pill profile-enabled"></span>
+        </div>
+        <dl class="profile-meta">
+          <div>
+            <dt>Resource</dt>
+            <dd class="profile-resource"></dd>
+          </div>
+          <div>
+            <dt>Last sync</dt>
+            <dd class="profile-last-sync"></dd>
+          </div>
+          <div>
+            <dt>Last error</dt>
+            <dd class="profile-last-error"></dd>
+          </div>
+        </dl>
+        <div class="profile-actions">
+          <button class="ghost action-edit" type="button">Edit</button>
+          <button class="ghost action-test" type="button">Test now</button>
+          <button class="danger action-delete" type="button">Delete</button>
+        </div>
+      </article>
+    </template>
+
+    <script src="static/app.js" type="module"></script>
+  </body>
+</html>

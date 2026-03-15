@@ -1,0 +1,22 @@
+name: "SOLID Sync"
+version: "0.1.0"
+slug: "solid_sync"
+description: "Sync Home Assistant sensor states to a SOLID pod."
+url: "https://github.com/hoelk-f/solid-sync"
+startup: application
+panel_title: "Solid"
+panel_icon: "mdi:database-sync"
+panel_admin: true
+ingress: true
+ingress_port: 8099
+homeassistant_api: true
+arch:
+  - aarch64
+  - amd64
+  - armhf
+  - armv7
+  - i386
+options:
+  log_level: info
+schema:
+  log_level: list(trace|debug|info|notice|warning|error|fatal)
