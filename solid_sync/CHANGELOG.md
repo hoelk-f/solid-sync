@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.1
+
+- Keep the sidebar metadata at `Solid Sync` and bump the add-on version again
+- Change live syncs into a rolling 24-hour upload window per profile
+- Queue daily snapshots locally and upload them in one append operation
+- Show pending entry count and next upload time in the UI
+
 ## 0.5.0
 
 - Rename the sidebar entry from `Solid` to `Solid Sync`

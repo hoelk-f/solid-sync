@@ -7,7 +7,7 @@ import os
 import re
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +15,7 @@ import aiohttp
 from aiohttp import WSMsgType, web
 
 CONFIG_PATH = Path("/data/solid-sync.json")
-CONFIG_SCHEMA_VERSION = 3
+CONFIG_SCHEMA_VERSION = 4
 HA_API_BASE = "http://supervisor/core/api"
 HA_WS_URL = "ws://supervisor/core/websocket"
 INGRESS_PORT = 8099
@@ -27,6 +27,17 @@ LOGGER = logging.getLogger("solid_sync")
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def parse_timestamp(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def add_day(value: str) -> str:
+    return (parse_timestamp(value) + timedelta(days=1)).isoformat()
 
 
 def normalize_measurement_key(value: str) -> str:
@@ -69,6 +80,8 @@ class SyncProfile:
     name: str
     resource_path: str
     measurements: list[SyncMeasurement] = field(default_factory=list)
+    pending_entries: list[dict[str, Any]] = field(default_factory=list)
+    next_flush_at: str | None = None
     last_sync_at: str | None = None
     last_error: str | None = None
     last_resource_path: str | None = None
@@ -304,6 +317,7 @@ class SolidSyncService:
         self._profile_locks: dict[str, asyncio.Lock] = {}
         self._shutdown_event = asyncio.Event()
         self._listener_task: asyncio.Task[None] | None = None
+        self._flush_task: asyncio.Task[None] | None = None
         self._listener_connected = False
         self._listener_last_error: str | None = None
         self._supervisor_token = os.environ.get("SUPERVISOR_TOKEN", "")
@@ -317,6 +331,7 @@ class SolidSyncService:
         self._session = aiohttp.ClientSession(timeout=timeout)
         await self._load_config()
         self._listener_task = asyncio.create_task(self._run_listener(), name="ha-listener")
+        self._flush_task = asyncio.create_task(self._run_flush_loop(), name="daily-flush")
         LOGGER.info("Solid Sync service started with %s profile(s)", len(self._profiles))
 
     async def stop(self) -> None:
@@ -326,6 +341,13 @@ class SolidSyncService:
             self._listener_task.cancel()
             try:
                 await self._listener_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._flush_task:
+            self._flush_task.cancel()
+            try:
+                await self._flush_task
             except asyncio.CancelledError:
                 pass
 
@@ -358,7 +380,7 @@ class SolidSyncService:
 
     async def list_profiles(self) -> list[dict[str, Any]]:
         async with self._config_lock:
-            return [asdict(profile) for profile in self._sorted_profiles()]
+            return [self._serialize_profile(profile) for profile in self._sorted_profiles()]
 
     async def list_entities(self) -> list[dict[str, Any]]:
         states = await self._fetch_states()
@@ -408,7 +430,7 @@ class SolidSyncService:
             self._profile_locks.setdefault(profile.id, asyncio.Lock())
             await self._save_config()
         LOGGER.info("Created profile %s with %s measurements", profile.name, len(profile.measurements))
-        return asdict(profile)
+        return self._serialize_profile(profile)
 
     async def update_profile(
         self, profile_id: str, payload: dict[str, Any]
@@ -424,7 +446,7 @@ class SolidSyncService:
             self._profile_locks.setdefault(profile.id, asyncio.Lock())
             await self._save_config()
         LOGGER.info("Updated profile %s", profile.name)
-        return asdict(profile)
+        return self._serialize_profile(profile)
 
     async def delete_profile(self, profile_id: str) -> None:
         async with self._config_lock:
@@ -436,12 +458,13 @@ class SolidSyncService:
         LOGGER.info("Deleted profile %s", removed.name)
 
     async def test_profile(self, profile_id: str) -> dict[str, Any]:
-        await self._sync_profile(profile_id, suppress_errors=False)
+        await self._queue_profile_snapshot(profile_id, suppress_errors=False)
+        await self._flush_profile(profile_id, suppress_errors=False)
         async with self._config_lock:
             profile = self._profiles.get(profile_id)
             if not profile:
                 raise web.HTTPNotFound(text="Profile not found")
-            return asdict(profile)
+            return self._serialize_profile(profile)
 
     async def _load_config(self) -> None:
         async with self._config_lock:
@@ -503,12 +526,23 @@ class SolidSyncService:
             for measurement in (measurements_raw or [])
             if str(measurement.get("entity_id", "")).strip()
         ]
+        pending_entries_raw = item.get("pending_entries")
+        pending_entries = (
+            self._normalize_entries(pending_entries_raw)
+            if isinstance(pending_entries_raw, list)
+            else []
+        )
+        next_flush_at = item.get("next_flush_at")
+        if pending_entries and not next_flush_at:
+            next_flush_at = add_day(pending_entries[0]["captured_at"])
 
         return SyncProfile(
             id=str(item.get("id", uuid.uuid4())),
             name=str(item.get("name", "")).strip(),
             resource_path=str(item.get("resource_path", "")).strip(),
             measurements=measurements,
+            pending_entries=pending_entries,
+            next_flush_at=next_flush_at,
             last_sync_at=item.get("last_sync_at"),
             last_error=item.get("last_error"),
             last_resource_path=item.get("last_resource_path"),
@@ -526,6 +560,12 @@ class SolidSyncService:
 
     def _sorted_profiles(self) -> list[SyncProfile]:
         return sorted(self._profiles.values(), key=lambda profile: profile.name.lower())
+
+    def _serialize_profile(self, profile: SyncProfile) -> dict[str, Any]:
+        data = asdict(profile)
+        data.pop("pending_entries", None)
+        data["pending_entry_count"] = len(profile.pending_entries)
+        return data
 
     def _build_settings(self, payload: dict[str, Any]) -> SolidSettings:
         settings = SolidSettings(
@@ -601,6 +641,8 @@ class SolidSyncService:
             name=name,
             resource_path=resource_path,
             measurements=measurements,
+            pending_entries=list(existing.pending_entries) if existing else [],
+            next_flush_at=existing.next_flush_at if existing else None,
             last_sync_at=existing.last_sync_at if existing else None,
             last_error=existing.last_error if existing else None,
             last_resource_path=existing.last_resource_path if existing else None,
@@ -699,6 +741,19 @@ class SolidSyncService:
                 LOGGER.warning("Listener error: %s", err)
                 await asyncio.sleep(backoff_seconds)
 
+    async def _run_flush_loop(self) -> None:
+        while not self._shutdown_event.is_set():
+            try:
+                await self._flush_due_profiles()
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=60)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                LOGGER.warning("Flush loop error: %s", err)
+                await asyncio.sleep(60)
+
     async def _authenticate_websocket(
         self, websocket: aiohttp.ClientWebSocketResponse
     ) -> None:
@@ -738,9 +793,9 @@ class SolidSyncService:
             ]
 
         for profile_id in matching_profile_ids:
-            await self._sync_profile(profile_id, suppress_errors=True)
+            await self._queue_profile_snapshot(profile_id, suppress_errors=True)
 
-    async def _sync_profile(self, profile_id: str, suppress_errors: bool) -> None:
+    async def _queue_profile_snapshot(self, profile_id: str, suppress_errors: bool) -> None:
         async with self._get_profile_lock(profile_id):
             async with self._config_lock:
                 profile = self._profiles.get(profile_id)
@@ -750,24 +805,6 @@ class SolidSyncService:
 
             try:
                 snapshot = await self._build_snapshot(profile)
-                client = self._get_client()
-                access_token = await client.get_access_token()
-                await client.ensure_parent_containers(
-                    profile.resource_path,
-                    access_token=access_token,
-                )
-                document = await self._build_appended_document(
-                    client,
-                    profile,
-                    snapshot,
-                    access_token=access_token,
-                )
-                target_path = profile.resource_path
-                await client.put_json(
-                    target_path,
-                    document,
-                    access_token=access_token,
-                )
             except Exception as err:
                 async with self._config_lock:
                     current = self._profiles.get(profile_id)
@@ -782,12 +819,90 @@ class SolidSyncService:
             async with self._config_lock:
                 current = self._profiles.get(profile_id)
                 if current:
-                    current.last_sync_at = snapshot["captured_at"]
+                    current.pending_entries.append(snapshot)
+                    if not current.next_flush_at:
+                        current.next_flush_at = add_day(snapshot["captured_at"])
+                    current.last_error = None
+                    await self._save_config()
+
+            LOGGER.info(
+                "Queued snapshot for profile %s (%s pending)",
+                profile.name,
+                len(current.pending_entries) if current else 0,
+            )
+
+    async def _flush_due_profiles(self) -> None:
+        now = datetime.now(timezone.utc)
+        async with self._config_lock:
+            due_profile_ids = [
+                profile.id
+                for profile in self._profiles.values()
+                if profile.pending_entries
+                and profile.next_flush_at
+                and parse_timestamp(profile.next_flush_at) <= now
+            ]
+
+        for profile_id in due_profile_ids:
+            await self._flush_profile(profile_id, suppress_errors=True)
+
+    async def _flush_profile(self, profile_id: str, suppress_errors: bool) -> None:
+        async with self._get_profile_lock(profile_id):
+            async with self._config_lock:
+                profile = self._profiles.get(profile_id)
+
+            if not profile or not profile.pending_entries:
+                return
+
+            pending_entries = list(profile.pending_entries)
+            flushed_at = utcnow()
+
+            try:
+                client = self._get_client()
+                access_token = await client.get_access_token()
+                await client.ensure_parent_containers(
+                    profile.resource_path,
+                    access_token=access_token,
+                )
+                document = await self._build_appended_document(
+                    client,
+                    profile,
+                    pending_entries,
+                    updated_at=flushed_at,
+                    access_token=access_token,
+                )
+                target_path = profile.resource_path
+                await client.put_json(
+                    target_path,
+                    document,
+                    access_token=access_token,
+                )
+            except Exception as err:
+                async with self._config_lock:
+                    current = self._profiles.get(profile_id)
+                    if current:
+                        current.last_error = str(err)
+                        await self._save_config()
+                LOGGER.error("Profile %s flush failed: %s", profile.name, err)
+                if not suppress_errors:
+                    raise
+                return
+
+            async with self._config_lock:
+                current = self._profiles.get(profile_id)
+                if current:
+                    current.pending_entries = []
+                    current.next_flush_at = None
+                    current.last_sync_at = flushed_at
                     current.last_error = None
                     current.last_resource_path = target_path
                     await self._save_config()
 
-            LOGGER.info("Synced profile %s to %s", profile.name, target_path)
+            LOGGER.info(
+                "Flushed %s queued snapshot(s) for profile %s to %s",
+                len(pending_entries),
+                profile.name,
+                target_path,
+            )
 
     async def _build_snapshot(self, profile: SyncProfile) -> dict[str, Any]:
         states = await asyncio.gather(
@@ -824,7 +939,8 @@ class SolidSyncService:
         self,
         client: SolidOIDCClient,
         profile: SyncProfile,
-        snapshot: dict[str, Any],
+        snapshots: list[dict[str, Any]],
+        updated_at: str,
         access_token: str | None = None,
     ) -> dict[str, Any]:
         existing = await client.get_json(
@@ -832,11 +948,11 @@ class SolidSyncService:
             access_token=access_token,
         )
         entries = self._extract_existing_entries(existing)
-        entries.append(snapshot)
+        entries.extend(snapshots)
         return {
             "profile": profile.name,
             "resource_path": profile.resource_path,
-            "updated_at": snapshot["captured_at"],
+            "updated_at": updated_at,
             "entries": entries,
         }
 

@@ -179,6 +179,15 @@ function profileTime(value) {
   return Number.isNaN(date.valueOf()) ? value : date.toLocaleString();
 }
 
+function profilePendingTime(value) {
+  if (!value) {
+    return "Waiting for first change";
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? value : date.toLocaleString();
+}
+
 function renderProfiles() {
   profileCount.textContent = String(state.profiles.length);
   profileList.innerHTML = "";
@@ -195,6 +204,11 @@ function renderProfiles() {
     node.querySelector(".profile-last-resource").textContent =
       profile.last_resource_path || "No file written yet";
     node.querySelector(".profile-last-sync").textContent = profileTime(profile.last_sync_at);
+    const pendingCount = profile.pending_entry_count || 0;
+    node.querySelector(".profile-next-flush").textContent = pendingCount
+      ? profilePendingTime(profile.next_flush_at)
+      : "No upload scheduled";
+    node.querySelector(".profile-pending-count").textContent = String(pendingCount);
     node.querySelector(".profile-last-error").textContent = profile.last_error || "None";
 
     const chips = node.querySelector(".profile-measurements");

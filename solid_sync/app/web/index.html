@@ -80,7 +80,7 @@
                 <label>
                   <span>Resource path</span>
                   <input id="resource_path" name="resource_path" type="text" placeholder="weather-stations/garden.json" required />
-                  <small class="helper">New snapshots are appended to this JSON file.</small>
+                  <small class="helper">New snapshots are collected locally and appended to this JSON file once per 24-hour window.</small>
                 </label>
 
                 <div class="measurements-block">
@@ -158,8 +158,16 @@
             <dd class="profile-last-resource"></dd>
           </div>
           <div>
-            <dt>Last sync</dt>
+            <dt>Last upload</dt>
             <dd class="profile-last-sync"></dd>
+          </div>
+          <div>
+            <dt>Next upload</dt>
+            <dd class="profile-next-flush"></dd>
+          </div>
+          <div>
+            <dt>Pending entries</dt>
+            <dd class="profile-pending-count"></dd>
           </div>
           <div>
             <dt>Last error</dt>

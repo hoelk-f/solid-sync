@@ -10,12 +10,13 @@ This add-on mirrors Home Assistant entity snapshots into a Solid pod.
 - Multiple measurements per profile
 - OIDC client-credentials authentication
 - Live subscription to Home Assistant `state_changed` events
-- Manual test trigger per profile
+- Rolling 24-hour upload window per profile
+- Manual test trigger per profile for immediate upload
 - Automatic creation of missing parent containers in the Solid pod
 
 ## Current payload model
 
-Each profile writes to one fixed JSON file. On every relevant `state_changed` event, the add-on downloads that file, appends a new snapshot entry and uploads it again:
+Each profile writes to one fixed JSON file. Relevant `state_changed` events are first collected locally for up to 24 hours. When the upload window is due, the add-on downloads that file, appends all queued snapshot entries and uploads it again:
 
 ```json
 {
@@ -57,5 +58,6 @@ Each profile writes to one fixed JSON file. On every relevant `state_changed` ev
 
 - The add-on stores both settings and profiles in `/data/solid-sync.json`.
 - Secrets are stored there in plain text because the add-on needs them to authenticate against the Solid issuer.
-- Each `state_changed` event from a mapped entity appends a new entry into the configured JSON resource.
+- Each mapped `state_changed` event queues a new local snapshot entry for the next daily upload.
 - If parent containers in the target path are missing, the add-on tries to create them before uploading the JSON resource.
+- `Test now` bypasses the daily wait by capturing one fresh snapshot and flushing the whole pending queue immediately.

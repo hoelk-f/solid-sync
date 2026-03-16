@@ -17,7 +17,8 @@ archive/                 Archived custom-integration prototype
 - lets you create multiple sync profiles in the web UI
 - lets each profile combine multiple entities into one snapshot
 - subscribes to Home Assistant `state_changed` events
-- appends each new snapshot into one Solid JSON file per profile
+- collects snapshots locally and uploads them once per 24-hour window per profile
+- appends the full queued daily batch into one Solid JSON file per profile
 - creates missing parent containers in the Solid pod before writing
 
 Current payload shape:
