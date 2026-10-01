@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.2
+
+- Accept browser-uploaded gzip resources served as `application/x-gzip` or binary data, avoiding Solid GET 501 conversion errors
+- Preserve recognized binary media types when updating existing gzip resources
+- Keep ETag preconditions, decompression checks and upload verification before clearing pending entries
+
 ## 0.6.1
 
 - Fix local builds on Supervisor 2026.04+ by setting an explicit, pinned default base image

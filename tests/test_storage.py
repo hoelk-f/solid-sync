@@ -249,6 +249,7 @@ class GzipUploadTests(unittest.IsolatedAsyncioTestCase):
         del self.service._target_path
         self.legacy_body = self.body
         self.gzip_body = None
+        self.gzip_content_type = "application/gzip"
         self.paths = []
 
     async def resource(self, request):
@@ -259,9 +260,12 @@ class GzipUploadTests(unittest.IsolatedAsyncioTestCase):
         if request.method == "GET":
             if self.gzip_body is None:
                 return web.Response(status=404)
-            return web.Response(body=self.gzip_body, content_type="application/gzip", headers={"ETag": '"gzip"'})
+            accepted = {part.split(";", 1)[0].strip() for part in request.headers.get("Accept", "").split(",")}
+            if self.gzip_content_type not in accepted and "*/*" not in accepted:
+                return web.Response(status=501, text="No conversion path for stored gzip media type")
+            return web.Response(body=self.gzip_body, content_type=self.gzip_content_type, headers={"ETag": '"gzip"'})
         self.puts.append(dict(request.headers))
-        self.assertEqual(request.headers["Content-Type"], "application/gzip")
+        self.assertEqual(request.headers["Content-Type"], self.gzip_content_type)
         self.assertNotIn("Content-Encoding", request.headers)
         self.assertEqual(request.headers.get("If-Match") if self.gzip_body else request.headers.get("If-None-Match"), '"gzip"' if self.gzip_body else "*")
         self.gzip_body = await request.read()
@@ -292,6 +296,18 @@ class GzipUploadTests(unittest.IsolatedAsyncioTestCase):
         await self.flush()
         self.assertEqual(json.loads(gzip.decompress(self.gzip_body))["entries"], [snapshot(0), snapshot(2), snapshot(1)])
         self.assertNotIn(("GET", "/history.json"), self.paths)
+
+    async def test_browser_uploaded_gzip_media_types_can_be_appended_and_verified(self):
+        for media_type in ("application/x-gzip", "application/octet-stream"):
+            with self.subTest(media_type=media_type):
+                self.gzip_content_type = media_type
+                self.gzip_body = gzip.compress(sync.encode_json({"entries": [snapshot(0)]}))
+                self.profile.pending_entries = [snapshot(1)]
+                await self.flush()
+                self.assertEqual(json.loads(gzip.decompress(self.gzip_body))["entries"], [snapshot(0), snapshot(1)])
+                self.assertEqual(self.saved_pending(), [])
+                self.assertEqual(self.puts[-1]["If-Match"], '"gzip"')
+                self.assertNotIn(("GET", "/history.json"), self.paths)
 
     async def test_corrupt_upload_keeps_queue_and_recovery_and_never_uses_old_json(self):
         self.mode = "truncate"

@@ -3,7 +3,7 @@
 ARG BUILD_FROM=ghcr.io/home-assistant/base:3.24-2026.08.0
 FROM $BUILD_FROM
 
-ARG BUILD_VERSION=0.6.1
+ARG BUILD_VERSION=0.6.2
 ARG BUILD_ARCH
 LABEL io.hass.version="$BUILD_VERSION" \
       io.hass.type="app" \

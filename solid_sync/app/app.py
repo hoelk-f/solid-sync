@@ -27,6 +27,12 @@ INGRESS_PORT = 8099
 ALLOWED_REMOTE_ADDRESSES = {"127.0.0.1", "::1", "172.30.32.2"}
 SUCCESS_STATUSES = {200, 201, 202, 204, 205}
 MAX_JSON_BYTES = 128 * 1024 * 1024
+# Browser uploads may label .gz as application/x-gzip; decode by magic bytes.
+# https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/MIME_types/Common_types
+JSON_RESOURCE_ACCEPT = (
+    "application/gzip, application/x-gzip, application/json;q=0.9, "
+    "application/octet-stream;q=0.8, */*;q=0.1"
+)
 
 LOGGER = logging.getLogger("solid_sync")
 
@@ -71,6 +77,7 @@ class SolidJSONResource:
     payload: Any
     etag: str | None
     exists: bool = True
+    content_type: str | None = None
 
 
 def utcnow() -> str:
@@ -309,7 +316,7 @@ class SolidOIDCClient:
         url = self._build_resource_url(resource_path)
         headers = {
             "Authorization": f"Bearer {token}",
-            "Accept": "application/gzip, application/json;q=0.9",
+            "Accept": JSON_RESOURCE_ACCEPT,
             "Cache-Control": "no-cache",
             # Use the stored representation's ETag for the subsequent If-Match.
             "Accept-Encoding": "identity",
@@ -336,7 +343,10 @@ class SolidOIDCClient:
                     body = compressed.read(MAX_JSON_BYTES + 1)
             if len(body) > MAX_JSON_BYTES:
                 raise ValueError("Decoded JSON exceeds the 128 MiB limit")
-            return SolidJSONResource(json.loads(body), etag)
+            return SolidJSONResource(
+                json.loads(body), etag,
+                content_type=content_type.split(";", 1)[0].strip().lower(),
+            )
         except (ValueError, UnicodeDecodeError, OSError, EOFError, zlib.error) as err:
             raise RuntimeError(
                 f"Solid resource {resource_path} is not valid JSON "
@@ -360,9 +370,15 @@ class SolidOIDCClient:
             raise RuntimeError("JSON exceeds the 128 MiB limit; upload stopped")
         if compressed:
             body = gzip.compress(body, mtime=0)
+        content_type = "application/gzip" if compressed else "application/json"
+        if compressed and previous.exists and previous.content_type in {
+            "application/gzip", "application/x-gzip", "application/octet-stream"
+        }:
+            # Retain the existing binary representation's media type on replacement.
+            content_type = previous.content_type
         headers = {
             "Authorization": f"Bearer {token}",
-            "Content-Type": "application/gzip" if compressed else "application/json",
+            "Content-Type": content_type,
         }
         # https://www.rfc-editor.org/rfc/rfc9110.html#section-13.1
         if previous.exists:
