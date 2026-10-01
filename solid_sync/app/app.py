@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
+import hashlib
+import io
 import json
 import logging
 import os
 import re
+import tempfile
 import uuid
+import zlib
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -21,8 +26,51 @@ HA_WS_URL = "ws://supervisor/core/websocket"
 INGRESS_PORT = 8099
 ALLOWED_REMOTE_ADDRESSES = {"127.0.0.1", "::1", "172.30.32.2"}
 SUCCESS_STATUSES = {200, 201, 202, 204, 205}
+MAX_JSON_BYTES = 128 * 1024 * 1024
 
 LOGGER = logging.getLogger("solid_sync")
+
+
+def encode_json(payload: Any) -> bytes:
+    return json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+
+
+def atomic_write(path: Path, data: bytes) -> None:
+    """Replace only after the complete temporary file has reached the disk."""
+    # https://docs.python.org/3/library/os.html#os.replace
+    # https://docs.python.org/3/library/os.html#os.fsync
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        if os.name == "posix":
+            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def snapshot_fingerprint(snapshot: dict[str, Any]) -> str:
+    canonical = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+@dataclass
+class SolidJSONResource:
+    payload: Any
+    etag: str | None
+    exists: bool = True
 
 
 def utcnow() -> str:
@@ -256,34 +304,44 @@ class SolidOIDCClient:
         self,
         resource_path: str,
         access_token: str | None = None,
-    ) -> Any | None:
+    ) -> SolidJSONResource:
         token = access_token or await self._authenticate()
         url = self._build_resource_url(resource_path)
         headers = {
             "Authorization": f"Bearer {token}",
-            "Accept": "application/json",
+            "Accept": "application/gzip, application/json;q=0.9",
+            "Cache-Control": "no-cache",
+            # Use the stored representation's ETag for the subsequent If-Match.
+            "Accept-Encoding": "identity",
         }
 
-        async with self._session.get(url, headers=headers) as response:
+        async with self._session.get(url, headers=headers, allow_redirects=False) as response:
             if response.status == 404:
-                return None
-            if response.status == 204:
-                return None
+                return SolidJSONResource(None, None, exists=False)
             if response.status != 200:
                 body = await response.text()
                 raise RuntimeError(
                     f"Solid GET failed with status {response.status}: {body}"
                 )
 
-            body = await response.text()
-            if not body.strip():
-                return None
+            body = await response.read()
+            etag = response.headers.get("ETag")
+            content_type = response.headers.get("Content-Type", "unknown")
 
         try:
-            return json.loads(body)
-        except json.JSONDecodeError as err:
+            if body.startswith(b"\x1f\x8b"):
+                # Bound expanded size and require gzip's end-of-stream CRC validation.
+                # https://docs.python.org/3/library/gzip.html#gzip.GzipFile
+                with gzip.GzipFile(fileobj=io.BytesIO(body)) as compressed:
+                    body = compressed.read(MAX_JSON_BYTES + 1)
+            if len(body) > MAX_JSON_BYTES:
+                raise ValueError("Decoded JSON exceeds the 128 MiB limit")
+            return SolidJSONResource(json.loads(body), etag)
+        except (ValueError, UnicodeDecodeError, OSError, EOFError, zlib.error) as err:
             raise RuntimeError(
-                "Solid resource is not valid JSON and cannot be appended"
+                f"Solid resource {resource_path} is not valid JSON "
+                f"({len(body)} bytes, Content-Type {content_type}): {err}. "
+                "Upload stopped; pending entries were retained."
             ) from err
 
     async def put_json(
@@ -291,20 +349,49 @@ class SolidOIDCClient:
         resource_path: str,
         payload: dict[str, Any],
         access_token: str | None = None,
+        *,
+        previous: SolidJSONResource,
     ) -> None:
         token = access_token or await self._authenticate()
         url = self._build_resource_url(resource_path)
+        compressed = resource_path.endswith(".gz")
+        body = encode_json(payload)
+        if len(body) > MAX_JSON_BYTES:
+            raise RuntimeError("JSON exceeds the 128 MiB limit; upload stopped")
+        if compressed:
+            body = gzip.compress(body, mtime=0)
         headers = {
             "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
+            "Content-Type": "application/gzip" if compressed else "application/json",
         }
+        # https://www.rfc-editor.org/rfc/rfc9110.html#section-13.1
+        if previous.exists:
+            if not previous.etag or previous.etag.startswith("W/"):
+                raise RuntimeError(
+                    "Solid resource has no strong ETag; safe replacement is unavailable"
+                )
+            headers["If-Match"] = previous.etag
+        else:
+            headers["If-None-Match"] = "*"
 
-        async with self._session.put(url, json=payload, headers=headers) as response:
+        async with self._session.put(
+            url, data=body, headers=headers, allow_redirects=False
+        ) as response:
+            if response.status == 412:
+                raise RuntimeError(
+                    "Solid resource changed during upload; pending entries retained for retry"
+                )
             if response.status not in SUCCESS_STATUSES:
                 body = await response.text()
                 raise RuntimeError(
                     f"Solid PUT failed with status {response.status}: {body}"
                 )
+
+        uploaded = await self.get_json(resource_path, access_token=token)
+        if not uploaded.exists or uploaded.payload != payload:
+            raise RuntimeError(
+                "Solid upload verification failed; pending entries were retained"
+            )
 
 
 class SolidSyncService:
@@ -556,7 +643,7 @@ class SolidSyncService:
             "profiles": [asdict(profile) for profile in self._sorted_profiles()],
             "saved_at": utcnow(),
         }
-        CONFIG_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        atomic_write(CONFIG_PATH, encode_json(payload))
 
     def _sorted_profiles(self) -> list[SyncProfile]:
         return sorted(self._profiles.values(), key=lambda profile: profile.name.lower())
@@ -822,7 +909,6 @@ class SolidSyncService:
                     current.pending_entries.append(snapshot)
                     if not current.next_flush_at:
                         current.next_flush_at = add_day(snapshot["captured_at"])
-                    current.last_error = None
                     await self._save_config()
 
             LOGGER.info(
@@ -863,39 +949,61 @@ class SolidSyncService:
                     profile.resource_path,
                     access_token=access_token,
                 )
-                document = await self._build_appended_document(
+                document, previous = await self._build_appended_document(
                     client,
                     profile,
                     pending_entries,
                     updated_at=flushed_at,
                     access_token=access_token,
                 )
-                target_path = profile.resource_path
+                target_path = self._target_path(profile)
+                # Preserve the entire intended upload locally before touching the Pod.
+                # This remains usable even when the server truncates an interrupted PUT.
+                atomic_write(
+                    self._recovery_path(profile),
+                    gzip.compress(encode_json(document), mtime=0),
+                )
                 await client.put_json(
                     target_path,
                     document,
                     access_token=access_token,
+                    previous=previous,
                 )
             except Exception as err:
+                message = str(err) or type(err).__name__
+                recovery_path = self._recovery_path(profile)
+                if recovery_path.exists():
+                    message += f" Local recovery copy: {recovery_path}"
                 async with self._config_lock:
                     current = self._profiles.get(profile_id)
                     if current:
-                        current.last_error = str(err)
+                        current.last_error = message
                         await self._save_config()
-                LOGGER.error("Profile %s flush failed: %s", profile.name, err)
+                LOGGER.error("Profile %s flush failed: %s", profile.name, message)
                 if not suppress_errors:
-                    raise
+                    raise RuntimeError(message) from err
                 return
 
             async with self._config_lock:
                 current = self._profiles.get(profile_id)
                 if current:
+                    old_status = (
+                        current.pending_entries, current.next_flush_at,
+                        current.last_sync_at, current.last_error, current.last_resource_path,
+                    )
                     current.pending_entries = []
                     current.next_flush_at = None
                     current.last_sync_at = flushed_at
                     current.last_error = None
                     current.last_resource_path = target_path
-                    await self._save_config()
+                    try:
+                        await self._save_config()
+                    except Exception:
+                        (
+                            current.pending_entries, current.next_flush_at,
+                            current.last_sync_at, current.last_error, current.last_resource_path,
+                        ) = old_status
+                        raise
 
             LOGGER.info(
                 "Flushed %s queued snapshot(s) for profile %s to %s",
@@ -935,6 +1043,15 @@ class SolidSyncService:
             "measurements": measurements_payload,
         }
 
+    def _recovery_path(self, profile: SyncProfile) -> Path:
+        identity = f"{self._settings.pod_url.rstrip('/')}|{profile.resource_path}|{profile.id}"
+        key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        return CONFIG_PATH.parent / "recovery" / f"{key}.json.gz"
+
+    def _target_path(self, profile: SyncProfile) -> str:
+        path = profile.resource_path.strip().strip("/")
+        return path if path.endswith(".gz") else f"{path}.gz"
+
     async def _build_appended_document(
         self,
         client: SolidOIDCClient,
@@ -942,19 +1059,42 @@ class SolidSyncService:
         snapshots: list[dict[str, Any]],
         updated_at: str,
         access_token: str | None = None,
-    ) -> dict[str, Any]:
-        existing = await client.get_json(
-            profile.resource_path,
+    ) -> tuple[dict[str, Any], SolidJSONResource]:
+        target = self._target_path(profile)
+        previous = await client.get_json(
+            target,
             access_token=access_token,
         )
-        entries = self._extract_existing_entries(existing)
-        entries.extend(snapshots)
-        return {
+        existing = previous
+        if not previous.exists and target.endswith(".gz"):
+            if profile.last_resource_path == target:
+                raise RuntimeError("Previously uploaded gzip resource is missing; restore the recovery copy")
+            # Bootstrap only when gzip is absent. Never fall back from corrupt gzip
+            # to a stale legacy history. The original JSON is left untouched.
+            existing = await client.get_json(target[:-3], access_token=access_token)
+        if existing.exists and existing.payload is None:
+            raise RuntimeError("Existing Solid resource is null; refusing to replace it")
+        entries = self._extract_existing_entries(existing.payload)
+        # A successful PUT may be followed by a lost response or a local crash.
+        # Only add pending snapshots not already present in the remote history.
+        seen = {snapshot_fingerprint(entry) for entry in entries}
+        for snapshot in snapshots:
+            fingerprint = snapshot_fingerprint(snapshot)
+            if fingerprint not in seen:
+                entries.append(snapshot)
+                seen.add(fingerprint)
+        document = (
+            dict(existing.payload)
+            if isinstance(existing.payload, dict) and "entries" in existing.payload
+            else {}
+        )
+        document.update({
             "profile": profile.name,
-            "resource_path": profile.resource_path,
+            "resource_path": target,
             "updated_at": updated_at,
             "entries": entries,
-        }
+        })
+        return document, previous
 
     def _extract_existing_entries(self, existing: Any) -> list[dict[str, Any]]:
         if existing is None:
@@ -964,7 +1104,7 @@ class SolidSyncService:
             raw_entries = existing.get("entries")
             if isinstance(raw_entries, list):
                 entries = self._normalize_entries(raw_entries)
-                if not entries and raw_entries:
+                if len(entries) != len(raw_entries):
                     raise RuntimeError(
                         "Existing Solid resource contains unsupported entry data"
                     )
@@ -980,7 +1120,7 @@ class SolidSyncService:
 
         if isinstance(existing, list):
             entries = self._normalize_entries(existing)
-            if not entries and existing:
+            if len(entries) != len(existing):
                 raise RuntimeError(
                     "Existing Solid resource contains unsupported entry data"
                 )
@@ -1005,10 +1145,7 @@ class SolidSyncService:
         if not captured_at or not isinstance(measurements, dict):
             return None
 
-        return {
-            "captured_at": captured_at,
-            "measurements": measurements,
-        }
+        return dict(item)
 
 
 @web.middleware

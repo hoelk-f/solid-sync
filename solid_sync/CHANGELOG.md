@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.0
+
+- Store the complete history losslessly as one `.json.gz` resource per profile
+- Import the legacy JSON on the first gzip upload and preserve the original file
+- Verify gzip uploads after decompression and retain all measurements and metadata
+- Stop on corrupt gzip or missing previously uploaded resources instead of reusing stale JSON
+- Bound expanded JSON size to 128 MiB
+
+## 0.5.2
+
+- Keep the existing single-file JSON format and URL, with compact UTF-8 serialization
+- Save settings and queued snapshots through a flushed temporary file and atomic replacement
+- Save a compressed local recovery copy of each complete intended upload before replacing the Pod resource
+- Guard Pod writes with ETag preconditions and read back the uploaded JSON before clearing the queue
+- Avoid duplicate snapshots when retrying an upload whose response or local acknowledgement was lost
+- Reject partially unsupported histories instead of silently removing entries
+- Keep upload errors visible when new sensor events arrive
+
 ## 0.5.1
 
 - Keep the sidebar metadata at `Solid Sync` and bump the add-on version again

@@ -18,15 +18,19 @@ archive/                 Archived custom-integration prototype
 - lets each profile combine multiple entities into one snapshot
 - subscribes to Home Assistant `state_changed` events
 - collects snapshots locally and uploads them once per 24-hour window per profile
-- appends the full queued daily batch into one Solid JSON file per profile
+- appends the full queued daily batch into one losslessly compressed JSON (`.json.gz`) file per profile
 - creates missing parent containers in the Solid pod before writing
 
-Current payload shape:
+The existing profile path `garden.json` now writes `garden.json.gz`. The first upload
+imports a valid legacy JSON file without deleting it. Consumers need gzip support;
+see [upgrade and recovery instructions](solid_sync/DOCS.md).
+
+Current payload shape after decompression:
 
 ```json
 {
   "profile": "Garden weather station",
-  "resource_path": "weather-stations/garden.json",
+  "resource_path": "weather-stations/garden.json.gz",
   "updated_at": "2026-03-15T16:42:01.284991+00:00",
   "entries": [
     {
