@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1
+
+- Fix local builds on Supervisor 2026.04+ by setting an explicit, pinned default base image
+- Add Home Assistant image labels and align advertised architectures with the amd64/aarch64 base image
+- Normalize the startup script's line endings for Linux builds from Windows checkouts
+
 ## 0.6.0
 
 - Store the complete history losslessly as one `.json.gz` resource per profile
